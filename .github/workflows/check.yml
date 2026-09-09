@@ -1,0 +1,34 @@
+name: Court Availability Checker
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # 每 5 分钟触发一次（实际执行时间可能有几分钟延迟）
+  workflow_dispatch:         # 允许在 Actions 页面手动点按钮触发，方便测试
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Create config file from secrets
+        run: |
+          cat > config.txt << 'EOF'
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH=${{ secrets.WATCH }}
+          EOF
+
+      - name: Run checker
+        run: python check_court_availability.py
