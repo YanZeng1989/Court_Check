@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 # Config
 # ---------------------------------------------------------------------------
 
-SEARCH_URL = "https://tokyo.lg.jp"
+SEARCH_URL = "https://kouen.sports.metro.tokyo.lg.jp/web/index.jsp"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
