@@ -35,6 +35,13 @@ Optional settings (add these lines if you want them):
         the "@" (e.g. "芝公園@"), it means "any time" for that park.
         If WATCH is set, it overrides BUILDINGS and TIMES below.
 
+    WEEKEND_ALL_DAY=芝公園
+        Comma-separated list of park names where, on Saturdays and
+        Sundays, the normal time filter (from WATCH or TIMES) is
+        ignored and ANY available time counts. Weekdays for that park
+        still follow the normal filter. Leave unset if you don't need
+        this.
+
     BUILDINGS=芝公園,日比谷公園
         Simple case: same time filter for every park. Comma-separated
         list of park names to check (see BUILDING_CODES below for the
@@ -228,6 +235,16 @@ def load_config() -> dict:
 
     config["_watch"] = watch
 
+    # Optional: parks where weekends ignore the time filter entirely
+    weekend_raw = config.get("WEEKEND_ALL_DAY", "").strip()
+    weekend_all_day = {name.strip() for name in weekend_raw.split(",") if name.strip()}
+    unknown_weekend = [name for name in weekend_all_day if name not in BUILDING_CODES]
+    if unknown_weekend:
+        print(f"Unknown park name(s) in WEEKEND_ALL_DAY: {', '.join(unknown_weekend)}")
+        print(f"Supported names: {', '.join(BUILDING_CODES.keys())}")
+        sys.exit(1)
+    config["_weekend_all_day"] = weekend_all_day
+
     # Optional log retention setting
     log_retention_raw = config.get("LOG_RETENTION_DAYS", "").strip()
     if log_retention_raw:
@@ -415,7 +432,7 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
 # Scraper
 # ---------------------------------------------------------------------------
 
-def check_building(page, building_name, building_code, today, current_year, current_month, time_filter):
+def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted):
     """Returns a list of (building_name, date, time_str) tuples found available for one park."""
     found = set()
 
@@ -451,8 +468,10 @@ def check_building(page, building_name, building_code, today, current_year, curr
                 continue  # never today or the past
 
             slot_time = SLOT_TIMES.get(slot_code)
+            is_weekend = slot_date.weekday() >= 5  # Saturday=5, Sunday=6
             if time_filter and slot_time not in time_filter:
-                continue  # not a time the user asked about
+                if not (weekend_unrestricted and is_weekend):
+                    continue  # not a time the user asked about (and no weekend override)
 
             img = cell.query_selector("img.calendar-status")
             alt = img.get_attribute("alt") if img else ""
@@ -468,7 +487,7 @@ def check_building(page, building_name, building_code, today, current_year, curr
     return sorted(found)
 
 
-def check_availability(watch: dict, headless: bool = True):
+def check_availability(watch: dict, weekend_all_day: set, headless: bool = True):
     today = datetime.date.today()
     current_month = today.month
     current_year = today.year
@@ -480,8 +499,9 @@ def check_availability(watch: dict, headless: bool = True):
 
         for name, time_filter in watch.items():
             code = BUILDING_CODES[name]
+            weekend_unrestricted = name in weekend_all_day
             all_found.extend(
-                check_building(page, name, code, today, current_year, current_month, time_filter)
+                check_building(page, name, code, today, current_year, current_month, time_filter, weekend_unrestricted)
             )
 
         browser.close()
@@ -498,7 +518,7 @@ def main():
     rotate_log_if_new_day(config["_log_retention_days"])
 
     try:
-        slots = check_availability(config["_watch"], headless=True)
+        slots = check_availability(config["_watch"], config["_weekend_all_day"], headless=True)
     except Exception as e:
         log_event(f"Error while checking availability: {e}")
         return
