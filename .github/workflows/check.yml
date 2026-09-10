@@ -1,13 +1,16 @@
 name: Court Availability Checker
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'   # 每 5 分钟触发一次（实际执行时间可能有几分钟延迟）
-  workflow_dispatch:         # 允许在 Actions 页面手动点按钮触发，方便测试
+  workflow_dispatch:   # 由外部（cron-job.org）每 5 分钟调用一次触发
+
+concurrency:
+  group: court-checker
+  cancel-in-progress: false   # 如果上一次还没跑完，新的会排队等，不会同时跑两份
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 4   # 安全阀：单次运行超过4分钟就自动终止，避免卡死导致后面全部堆积排队
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -28,6 +31,7 @@ jobs:
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH=${{ secrets.WATCH }}
+          WEEKEND_ALL_DAY=${{ secrets.WEEKEND_ALL_DAY }}
           EOF
 
       - name: Run checker
