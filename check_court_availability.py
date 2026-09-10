@@ -450,7 +450,11 @@ def _open_search_and_select(page, building_code: str):
             page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_selector("#purpose-home", timeout=20000)
             page.select_option("#purpose-home", PURPOSE_VALUE)
-            page.wait_for_timeout(1000)
+            # The site enables #bname-home via AJAX after the purpose is
+            # selected — wait for it to actually become usable instead of
+            # guessing a fixed delay (this is what was causing the
+            # intermittent "element is not enabled" timeouts).
+            page.wait_for_selector("#bname-home:not([disabled])", timeout=15000)
             page.select_option("#bname-home", building_code)
             page.wait_for_timeout(500)
             page.click("#btn-go")
