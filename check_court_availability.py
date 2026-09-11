@@ -76,13 +76,27 @@ Optional settings (add these lines if you want them):
         is skipped. Lower = stricter (fewer notifications, but higher
         confidence of dry weather). Defaults to 30 if not set.
 
+    DEBUG=true
+        If true, on ANY error the script saves a screenshot
+        (debug_error.png) and the full page HTML (debug_error.html)
+        next to this script, plus prints extra detail about what step
+        it was on when it failed. Works fine in headless mode (e.g.
+        GitHub Actions) — turn this on any time you want to see what
+        the page actually looked like when something broke.
+
+    HEADED=true
+        If true, runs with a VISIBLE browser window instead of
+        headless. Only works on your own machine with a display —
+        never set this on GitHub Actions or any other headless CI
+        runner, the browser launch will just fail there.
+
 You do NOT need to put your login ID/password anywhere — checking
 availability doesn't require logging in. You'd only log in yourself,
 manually, at the very end to actually make the booking.
 
-Run once manually first, with headless=False (see near the bottom), to
-confirm each click/selector still matches the live site before you
-schedule it unattended.
+Run once manually first, with DEBUG=true (and HEADED=true if you're on
+your own machine with a display) to confirm each click/selector still
+matches the live site before you schedule it unattended.
 """
 
 import os
@@ -93,7 +107,7 @@ import datetime
 import urllib.request
 import urllib.parse
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ---------------------------------------------------------------------------
 # Config
@@ -103,6 +117,8 @@ SEARCH_URL = "https://kouen.sports.metro.tokyo.lg.jp/web/index.jsp"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
+DEBUG_SCREENSHOT_PATH = os.path.join(SCRIPT_DIR, "debug_error.png")
+DEBUG_HTML_PATH = os.path.join(SCRIPT_DIR, "debug_error.html")
 
 PURPOSE_VALUE = "1000_1030"  # テニス（人工芝）
 
@@ -166,6 +182,17 @@ MAX_WEEKS_TO_CHECK = 6  # safety cap; loop also stops once it leaves the current
 
 REQUIRED_KEYS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
 
+# Common cookie/agreement dialog selectors seen on JP municipal sites.
+# We try each one briefly; if none show up, we just move on.
+COOKIE_DIALOG_SELECTORS = [
+    "text=同意する",
+    "text=OK",
+    "text=閉じる",
+    "#agree-btn",
+    "#cookie-agree",
+    ".modal-close",
+]
+
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_PATH):
@@ -190,9 +217,6 @@ def load_config() -> dict:
         print(f"config.txt is missing: {', '.join(missing)}")
         sys.exit(1)
 
-    # Which parks to check, and which times matter for each one.
-    # Result is stored as config["_watch"], a dict: {park_name: set_of_times}
-    # An empty set of times means "any time" for that park.
     watch_raw = config.get("WATCH", "").strip()
     watch = {}
 
@@ -210,7 +234,6 @@ def load_config() -> dict:
             times = {t.strip() for t in times_str.split(",") if t.strip()}
             watch[name] = times
     else:
-        # Fall back to the simpler BUILDINGS + TIMES (same filter for all parks)
         buildings_raw = config.get("BUILDINGS", DEFAULT_BUILDING)
         building_names = [b.strip() for b in buildings_raw.split(",") if b.strip()]
         times_raw = config.get("TIMES", "")
@@ -235,7 +258,6 @@ def load_config() -> dict:
 
     config["_watch"] = watch
 
-    # Optional: parks where weekends ignore the time filter entirely
     weekend_raw = config.get("WEEKEND_ALL_DAY", "").strip()
     weekend_all_day = {name.strip() for name in weekend_raw.split(",") if name.strip()}
     unknown_weekend = [name for name in weekend_all_day if name not in BUILDING_CODES]
@@ -245,7 +267,6 @@ def load_config() -> dict:
         sys.exit(1)
     config["_weekend_all_day"] = weekend_all_day
 
-    # Optional log retention setting
     log_retention_raw = config.get("LOG_RETENTION_DAYS", "").strip()
     if log_retention_raw:
         try:
@@ -256,7 +277,6 @@ def load_config() -> dict:
     else:
         config["_log_retention_days"] = DEFAULT_LOG_RETENTION_DAYS
 
-    # Optional rain check (defaults to on)
     skip_on_rain_raw = config.get("SKIP_ON_RAIN", "true").strip().lower()
     config["_skip_on_rain"] = skip_on_rain_raw not in ("false", "0", "no", "off")
 
@@ -270,6 +290,19 @@ def load_config() -> dict:
     else:
         config["_rain_threshold"] = DEFAULT_RAIN_THRESHOLD
 
+    # DEBUG only controls extra logging + a screenshot/HTML dump on error.
+    # It does NOT force a visible browser — headless CI runners (e.g. GitHub
+    # Actions) have no display and would crash if we tried. Screenshots work
+    # fine in headless mode too.
+    debug_raw = config.get("DEBUG", "false").strip().lower()
+    config["_debug"] = debug_raw in ("true", "1", "yes", "on")
+
+    # HEADED forces a visible browser window. Only use this on your own
+    # machine with a display — never set it true in GitHub Actions or any
+    # other headless CI runner, or the browser launch will fail.
+    headed_raw = config.get("HEADED", "false").strip().lower()
+    config["_headed"] = headed_raw in ("true", "1", "yes", "on")
+
     return config
 
 
@@ -278,7 +311,6 @@ def load_config() -> dict:
 # ---------------------------------------------------------------------------
 
 def log_event(message: str):
-    """Prints a timestamped line and appends it to log.txt."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
     print(line)
@@ -290,7 +322,6 @@ def log_event(message: str):
 
 
 def _already_rotated_today() -> bool:
-    """Checks a small marker file to see if we've already rotated the log today."""
     today_str = datetime.date.today().isoformat()
     if not os.path.exists(ROTATION_MARKER_PATH):
         return False
@@ -310,9 +341,6 @@ def _mark_rotated_today():
 
 
 def rotate_log_if_new_day(retention_days: int):
-    """Only actually cleans log.txt once per calendar day (the first run after
-    midnight), not on every single check — keeps things efficient even when
-    running every few minutes."""
     if _already_rotated_today():
         return
     rotate_log(retention_days)
@@ -320,7 +348,6 @@ def rotate_log_if_new_day(retention_days: int):
 
 
 def rotate_log(retention_days: int):
-    """Deletes log.txt entries older than retention_days."""
     if not os.path.exists(LOG_PATH):
         return
 
@@ -330,7 +357,7 @@ def rotate_log(retention_days: int):
         with open(LOG_PATH, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception:
-        return  # if we can't read it, just leave it alone
+        return
 
     kept_lines = []
     removed = 0
@@ -359,9 +386,6 @@ def rotate_log(retention_days: int):
 # ---------------------------------------------------------------------------
 
 def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER_LAT, lon: float = WEATHER_LON):
-    """Returns {hour_0_to_23: precipitation_probability_percent} for the
-    given date, or None if the forecast couldn't be fetched (e.g. the date
-    is too far in the future for Open-Meteo's free forecast range)."""
     date_str = date_obj.isoformat()
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -376,7 +400,6 @@ def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER
         probs = data.get("hourly", {}).get("precipitation_probability", [])
         result = {}
         for t, p in zip(times, probs):
-            # t looks like "2026-08-05T17:00"
             hour = int(t.split("T")[1].split(":")[0])
             result[hour] = p
         return result or None
@@ -386,12 +409,8 @@ def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER
 
 
 def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int) -> bool:
-    """Checks the rain forecast across [slot_start - buffer, slot_end + buffer].
-    Returns True if it's safe to notify (low rain chance, OR forecast simply
-    isn't available — we fail open rather than hide a real opening), False
-    if the max rain probability in that window meets/exceeds the threshold."""
     if not slot_time or ":" not in slot_time:
-        return True  # no time info to check against; fail open
+        return True
 
     try:
         start_hour = int(slot_time.split(":")[0])
@@ -400,16 +419,16 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
 
     hourly_probs = _get_hourly_rain_probabilities(slot_date)
     if hourly_probs is None:
-        return True  # couldn't get a forecast — fail open
+        return True
 
     window_start = start_hour - WEATHER_BUFFER_HOURS
-    window_end = start_hour + SLOT_DURATION_HOURS + WEATHER_BUFFER_HOURS  # exclusive
+    window_end = start_hour + SLOT_DURATION_HOURS + WEATHER_BUFFER_HOURS
     relevant_probs = [
         hourly_probs[h] for h in range(window_start, window_end)
         if h in hourly_probs
     ]
     if not relevant_probs:
-        return True  # nothing in range to judge by — fail open
+        return True
 
     return max(relevant_probs) < threshold
 
@@ -429,51 +448,99 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
 
 
 # ---------------------------------------------------------------------------
+# Debug helpers
+# ---------------------------------------------------------------------------
+
+def save_debug_snapshot(page, label: str):
+    try:
+        page.screenshot(path=DEBUG_SCREENSHOT_PATH, full_page=True)
+        with open(DEBUG_HTML_PATH, "w", encoding="utf-8") as f:
+            f.write(page.content())
+        log_event(
+            f"[debug] Saved snapshot for '{label}' -> "
+            f"{DEBUG_SCREENSHOT_PATH} and {DEBUG_HTML_PATH} "
+            f"(current URL: {page.url})"
+        )
+    except Exception as snap_err:
+        log_event(f"[debug] Could not save debug snapshot: {snap_err}")
+
+
+def dismiss_cookie_dialog_if_present(page):
+    for selector in COOKIE_DIALOG_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=1000):
+                locator.click(timeout=2000)
+                page.wait_for_timeout(500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
 
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
-MAX_NAVIGATION_ATTEMPTS = 2  # first try + 1 retry
-RETRY_WAIT_MS = 4000
-
-
-def _open_search_and_select(page, building_code: str):
-    """Navigates to the search page and selects purpose/building, retrying
-    once if the page is slow to respond or an element isn't found in time."""
-    last_error = None
-    for attempt in range(1, MAX_NAVIGATION_ATTEMPTS + 1):
-        try:
-            page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_selector("#purpose-home", timeout=20000)
-            page.select_option("#purpose-home", PURPOSE_VALUE)
-            # The site enables #bname-home via AJAX after the purpose is
-            # selected — wait for it to actually become usable instead of
-            # guessing a fixed delay (this is what was causing the
-            # intermittent "element is not enabled" timeouts).
-            page.wait_for_selector("#bname-home:not([disabled])", timeout=15000)
-            page.select_option("#bname-home", building_code)
-            page.wait_for_timeout(500)
-            page.click("#btn-go")
-            page.wait_for_load_state("networkidle", timeout=30000)
-            page.wait_for_timeout(1000)
-            return  # success
-        except Exception as e:
-            last_error = e
-            if attempt < MAX_NAVIGATION_ATTEMPTS:
-                log_event(f"(navigation attempt {attempt} failed, retrying: {e})")
-                page.wait_for_timeout(RETRY_WAIT_MS)
-    raise last_error
-
-
-def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted):
+def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
     """Returns a list of (building_name, date, time_str) tuples found available for one park."""
     found = set()
 
-    _open_search_and_select(page, building_code)
+    page.goto(SEARCH_URL, wait_until="networkidle")
+
+    if debug:
+        log_event(f"[debug] Loaded {page.url} (title: {page.title()!r}) before selecting purpose for {building_name}")
+
+    dismiss_cookie_dialog_if_present(page)
+
+    try:
+        page.wait_for_selector("#purpose-home", state="visible", timeout=15000)
+    except PlaywrightTimeoutError:
+        if debug:
+            save_debug_snapshot(page, f"purpose-home-not-visible_{building_name}")
+        raise RuntimeError(
+            "#purpose-home never became visible after loading the search page "
+            f"for {building_name}. Check debug_error.png / debug_error.html "
+            "(set DEBUG=true in config.txt) to see what the page showed."
+        )
+
+    page.select_option("#purpose-home", PURPOSE_VALUE)
+    page.wait_for_timeout(1000)
+
+    try:
+        page.wait_for_selector("#bname-home", state="visible", timeout=10000)
+        page.select_option("#bname-home", building_code)
+    except PlaywrightTimeoutError:
+        if debug:
+            save_debug_snapshot(page, f"bname-home-not-visible_{building_name}")
+        raise RuntimeError(
+            f"#bname-home never became visible/ready for {building_name} "
+            "after selecting the purpose. It may depend on an AJAX call "
+            "triggered by changePurpose() that hadn't finished yet."
+        )
+
+    page.wait_for_timeout(500)
+    page.click("#btn-go")
+
+    # This is the step that was previously a single hard-coded wait_for_timeout.
+    # If the search doesn't actually navigate to a calendar (e.g. a validation
+    # error, an alert() dialog, or the click landing on a stale/detached
+    # element after a re-render), #week-head will never appear and we want a
+    # clear, specific error instead of a bare 30s timeout on inner_text.
+    page.wait_for_load_state("networkidle")
+    try:
+        page.wait_for_selector("#week-head", state="visible", timeout=15000)
+    except PlaywrightTimeoutError:
+        if debug:
+            save_debug_snapshot(page, f"week-head-not-visible_{building_name}")
+        raise RuntimeError(
+            f"#week-head never appeared for {building_name} after clicking "
+            "#btn-go. Possible causes: the click triggered a JS alert/confirm "
+            "dialog that's blocking navigation, a validation error was shown "
+            "instead of the calendar, or the calendar page uses a different "
+            "element id than expected. Check debug_error.png / "
+            "debug_error.html (set DEBUG=true) to see what actually rendered."
+        )
 
     for _ in range(MAX_WEEKS_TO_CHECK):
         header_text = page.inner_text("#week-head")  # e.g. "2026年7月"
@@ -482,10 +549,10 @@ def check_building(page, building_name, building_code, today, current_year, curr
             break
         year, month = int(m.group(1)), int(m.group(2))
         if year != current_year or month != current_month:
-            break  # left the current month; stop here
+            break
 
         for cell in page.query_selector_all("td[onclick*='setReserv']"):
-            cell_id = cell.get_attribute("id")  # e.g. "20260731_30"
+            cell_id = cell.get_attribute("id")
             if not cell_id or "_" not in cell_id:
                 continue
             date_str, slot_code = cell_id.split("_", 1)
@@ -495,13 +562,13 @@ def check_building(page, building_name, building_code, today, current_year, curr
                 continue
 
             if slot_date <= today:
-                continue  # never today or the past
+                continue
 
             slot_time = SLOT_TIMES.get(slot_code)
-            is_weekend = slot_date.weekday() >= 5  # Saturday=5, Sunday=6
+            is_weekend = slot_date.weekday() >= 5
             if time_filter and slot_time not in time_filter:
                 if not (weekend_unrestricted and is_weekend):
-                    continue  # not a time the user asked about (and no weekend override)
+                    continue
 
             img = cell.query_selector("img.calendar-status")
             alt = img.get_attribute("alt") if img else ""
@@ -517,7 +584,7 @@ def check_building(page, building_name, building_code, today, current_year, curr
     return sorted(found)
 
 
-def check_availability(watch: dict, weekend_all_day: set, headless: bool = True):
+def check_availability(watch: dict, weekend_all_day: set, headless: bool = True, debug: bool = False):
     today = datetime.date.today()
     current_month = today.month
     current_year = today.year
@@ -525,17 +592,21 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(user_agent=BROWSER_USER_AGENT)
-        page = context.new_page()
+        page = browser.new_page()
 
-        for name, time_filter in watch.items():
-            code = BUILDING_CODES[name]
-            weekend_unrestricted = name in weekend_all_day
-            all_found.extend(
-                check_building(page, name, code, today, current_year, current_month, time_filter, weekend_unrestricted)
-            )
-
-        browser.close()
+        try:
+            for name, time_filter in watch.items():
+                code = BUILDING_CODES[name]
+                weekend_unrestricted = name in weekend_all_day
+                all_found.extend(
+                    check_building(page, name, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
+                )
+        except Exception:
+            if debug:
+                save_debug_snapshot(page, "unhandled_error")
+            raise
+        finally:
+            browser.close()
 
     return all_found
 
@@ -549,7 +620,12 @@ def main():
     rotate_log_if_new_day(config["_log_retention_days"])
 
     try:
-        slots = check_availability(config["_watch"], config["_weekend_all_day"], headless=True)
+        slots = check_availability(
+            config["_watch"],
+            config["_weekend_all_day"],
+            headless=not config["_headed"],
+            debug=config["_debug"],
+        )
     except Exception as e:
         log_event(f"Error while checking availability: {e}")
         return
