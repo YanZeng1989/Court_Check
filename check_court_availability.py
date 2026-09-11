@@ -478,6 +478,34 @@ def dismiss_cookie_dialog_if_present(page):
     return False
 
 
+def attach_ajax_logger(page, debug: bool):
+    """In debug mode, logs every request/response to a *.do endpoint (the
+    site's server actions) so we can see whether the week/month calendar
+    AJAX call actually fires, and what it comes back with, without needing
+    to reproduce the site locally."""
+    if not debug:
+        return
+
+    def on_request(request):
+        if ".do" in request.url:
+            log_event(f"[debug][ajax->] {request.method} {request.url}")
+
+    def on_response(response):
+        if ".do" in response.url:
+            try:
+                body = response.text()
+            except Exception as e:
+                body = f"(could not read body: {e})"
+            snippet = body[:500].replace("\n", " ")
+            log_event(
+                f"[debug][ajax<-] {response.status} {response.url} "
+                f"body[:500]={snippet!r}"
+            )
+
+    page.on("request", on_request)
+    page.on("response", on_response)
+
+
 # ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
@@ -593,6 +621,7 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         page = browser.new_page()
+        attach_ajax_logger(page, debug)
 
         try:
             for name, time_filter in watch.items():
