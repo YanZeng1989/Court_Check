@@ -6,9 +6,25 @@ on:
     - cron: '*/30 * * * *'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
 
+# Prevents overlapping runs: if a run is still in progress when the next
+# scheduled trigger fires, the new one queues up and waits instead of
+# starting in parallel. Only one run can be queued behind the active one at
+# a time — if several triggers pile up while one is running, only the
+# newest queued run survives and the rest are dropped (this is GitHub's
+# default queueing behavior for a concurrency group, not something we
+# configure directly).
+concurrency:
+  group: check-court-availability
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Hard cap on how long a single run may take. If the site hangs and the
+    # script doesn't return in time, GitHub kills this run at 10 minutes
+    # instead of letting it (and everything queued behind it) stall
+    # indefinitely. The next scheduled run then proceeds normally.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
