@@ -538,9 +538,21 @@ class MaintenanceDetected(Exception):
 
 def _matched_maintenance_keyword(content: str):
     for keyword in MAINTENANCE_KEYWORDS:
-        if keyword in content:
-            return keyword
-    return None
+        idx = content.find(keyword)
+        if idx != -1:
+            return keyword, idx
+    return None, -1
+
+
+def _log_match_context(content: str, keyword: str, idx: int):
+    """Logs the raw HTML surrounding a matched keyword so we can tell
+    whether it's a real, currently-active notice or just incidental text
+    (e.g. a static FAQ line, a JS variable name, a hidden/collapsed block)
+    that happens to contain the same words."""
+    start = max(0, idx - 150)
+    end = min(len(content), idx + len(keyword) + 150)
+    snippet = content[start:end].replace("\n", " ")
+    log_event(f"[maintenance-check] matched {keyword!r}, context: ...{snippet}...")
 
 
 def try_recover_via_home_button(page, debug=False) -> bool:
@@ -550,19 +562,18 @@ def try_recover_via_home_button(page, debug=False) -> bool:
     try:
         home_button = page.locator(HOME_BUTTON_SELECTOR).first
         if not home_button.is_visible(timeout=2000):
+            log_event("[maintenance-check] No 'ホームへ' button found on this page to click")
             return False
     except Exception:
         return False
 
-    if debug:
-        log_event("[debug] Blocked/notice page detected — clicking 'ホームへ' to try to recover")
+    log_event("[maintenance-check] Blocked/notice page detected — clicking 'ホームへ' to try to recover")
 
     try:
         home_button.click(timeout=5000)
         page.wait_for_load_state("networkidle")
     except Exception as e:
-        if debug:
-            log_event(f"[debug] Clicking home button failed: {e}")
+        log_event(f"[maintenance-check] Clicking home button failed: {e}")
         return False
 
     try:
@@ -570,11 +581,13 @@ def try_recover_via_home_button(page, debug=False) -> bool:
     except Exception:
         return False
 
-    if _matched_maintenance_keyword(content):
+    keyword, idx = _matched_maintenance_keyword(content)
+    if keyword:
+        log_event("[maintenance-check] Still showing the notice after clicking home:")
+        _log_match_context(content, keyword, idx)
         return False  # still stuck even after clicking home
 
-    if debug:
-        log_event("[debug] Recovered — back on a normal page after clicking home button")
+    log_event("[maintenance-check] Recovered — back on a normal page after clicking home button")
     return True
 
 
@@ -592,9 +605,14 @@ def check_for_maintenance(page, debug=False) -> bool:
     except Exception:
         return False
 
-    keyword = _matched_maintenance_keyword(content)
+    keyword, idx = _matched_maintenance_keyword(content)
     if not keyword:
         return False
+
+    log_event(f"[maintenance-check] Page at {page.url} matched a maintenance/blocked keyword.")
+    _log_match_context(content, keyword, idx)
+    if debug:
+        save_debug_snapshot(page, "maintenance_keyword_matched")
 
     if try_recover_via_home_button(page, debug=debug):
         return True
@@ -800,7 +818,12 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
 # Main
 # ---------------------------------------------------------------------------
 
-MAINTENANCE_RETRY_WAIT_SECONDS = 5 * 60  # how long to pause before retrying
+MAINTENANCE_RETRY_WAIT_SECONDS = 30  # how long to pause before retrying.
+                                       # Shortened for now while diagnosing
+                                       # false positives — once confirmed
+                                       # real maintenance windows are being
+                                       # detected correctly, feel free to
+                                       # raise this back up (e.g. to 5*60).
 MAINTENANCE_MAX_RETRIES = 1              # retry once, then give up for this run
 
 
