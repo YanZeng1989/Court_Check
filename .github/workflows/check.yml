@@ -19,7 +19,13 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Runs on YOUR own PC (registered as a self-hosted runner) instead of
+    # GitHub's shared cloud servers — this is what gets us a normal
+    # residential/office IP instead of a GitHub Actions IP that the site
+    # blocks. Make sure the runner is installed as a Windows service and
+    # showing "Idle" under Settings → Actions → Runners before relying on
+    # the schedule.
+    runs-on: self-hosted
     # Hard cap on how long a single run may take. Bumped to 15 because the
     # script itself can now sleep 5 minutes and retry once if it detects a
     # site maintenance page — 10 minutes was too tight a margin for that.
@@ -34,16 +40,17 @@ jobs:
       - name: Install dependencies
         run: |
           pip install playwright
-          playwright install --with-deps chromium
+          playwright install chromium
 
       - name: Write config.txt from secrets
+        shell: pwsh
         run: |
-          cat > config.txt << EOF
+          @"
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           BUILDINGS=芝公園
           DEBUG=true
-          EOF
+          "@ | Out-File -FilePath config.txt -Encoding utf8NoBOM
 
       - name: Run checker
         run: python check_court_availability.py
