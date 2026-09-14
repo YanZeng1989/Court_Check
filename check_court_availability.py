@@ -506,6 +506,31 @@ def attach_ajax_logger(page, debug: bool):
     page.on("response", on_response)
 
 
+# Keywords that indicate the site itself is showing a maintenance notice
+# rather than the normal reservation UI. Kept broad but specific enough to
+# avoid false positives on ordinary error messages.
+MAINTENANCE_KEYWORDS = ["メンテナンス", "メンテナンス中", "只今の時間は", "サービスを一時停止"]
+
+
+class MaintenanceDetected(Exception):
+    """Raised when the site appears to be down for maintenance, so the
+    caller can skip this run quietly instead of treating it as a script
+    bug."""
+    pass
+
+
+def check_for_maintenance(page):
+    try:
+        content = page.content()
+    except Exception:
+        return  # if we can't even read the page, let the normal error path handle it
+    for keyword in MAINTENANCE_KEYWORDS:
+        if keyword in content:
+            raise MaintenanceDetected(
+                f"Site shows a maintenance notice (matched keyword: {keyword!r}) at {page.url}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
@@ -515,6 +540,7 @@ def check_building(page, building_name, building_code, today, current_year, curr
     found = set()
 
     page.goto(SEARCH_URL, wait_until="networkidle")
+    check_for_maintenance(page)
 
     if debug:
         log_event(f"[debug] Loaded {page.url} (title: {page.title()!r}) before selecting purpose for {building_name}")
@@ -556,6 +582,7 @@ def check_building(page, building_name, building_code, today, current_year, curr
     # element after a re-render), #week-head will never appear and we want a
     # clear, specific error instead of a bare 30s timeout on inner_text.
     page.wait_for_load_state("networkidle")
+    check_for_maintenance(page)
     try:
         page.wait_for_selector("#week-head", state="visible", timeout=15000)
     except PlaywrightTimeoutError:
@@ -630,6 +657,10 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
                 all_found.extend(
                     check_building(page, name, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
                 )
+        except MaintenanceDetected:
+            # Not a bug — nothing useful to screenshot, and no need to treat
+            # this like an error. Just stop checking the remaining parks.
+            raise
         except Exception:
             if debug:
                 save_debug_snapshot(page, "unhandled_error")
@@ -655,6 +686,13 @@ def main():
             headless=not config["_headed"],
             debug=config["_debug"],
         )
+    except MaintenanceDetected as e:
+        # Quiet skip: not an error, no Telegram notification, exit code 0.
+        # The site is under maintenance right now — the next scheduled run
+        # (per your GitHub Actions cron, e.g. ~30 minutes later) will just
+        # try again naturally.
+        log_event(f"Site under maintenance, skipping this run: {e}")
+        return
     except Exception as e:
         log_event(f"Error while checking availability: {e}")
         return
