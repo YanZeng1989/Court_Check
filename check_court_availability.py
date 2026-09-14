@@ -507,9 +507,9 @@ def attach_ajax_logger(page, debug: bool):
     page.on("response", on_response)
 
 
-# Keywords that indicate the site itself is showing a maintenance notice
-# rather than the normal reservation UI. Kept broad but specific enough to
-# avoid false positives on ordinary error messages.
+# Keywords that indicate the site itself is showing a maintenance/blocked
+# notice rather than the normal reservation UI. Kept broad but specific
+# enough to avoid false positives on ordinary error messages.
 MAINTENANCE_KEYWORDS = [
     "メンテナンス",
     "メンテナンス中",
@@ -520,36 +520,119 @@ MAINTENANCE_KEYWORDS = [
     "施設予約システムからのお知らせ",             # generic "notice from the reservation system" interstitial
 ]
 
+# The blocked/notice interstitial has a "ホームへ" (back to home) button that
+# just does location.href='/web/index.jsp'. Manually testing showed that
+# reloading the SAME stuck URL keeps failing, but clicking this button (an
+# in-page navigation back to the home page) recovers cleanly. So we try
+# clicking it automatically before giving up and treating this as a full
+# site outage.
+HOME_BUTTON_SELECTOR = "#btn-light, button:has-text('ホームへ')"
+
 
 class MaintenanceDetected(Exception):
-    """Raised when the site appears to be down for maintenance, so the
-    caller can skip this run quietly instead of treating it as a script
-    bug."""
+    """Raised when the site appears to be down for maintenance (or stuck on
+    a blocked interstitial we couldn't click our way out of), so the caller
+    can skip this run quietly instead of treating it as a script bug."""
     pass
 
 
-def check_for_maintenance(page):
+def _matched_maintenance_keyword(content: str):
+    for keyword in MAINTENANCE_KEYWORDS:
+        if keyword in content:
+            return keyword
+    return None
+
+
+def try_recover_via_home_button(page, debug=False) -> bool:
+    """Attempts the same recovery a human found worked by hand: click the
+    'ホームへ' button (real in-page navigation) instead of reloading.
+    Returns True if we're back on a normal (non-blocked) page afterward."""
+    try:
+        home_button = page.locator(HOME_BUTTON_SELECTOR).first
+        if not home_button.is_visible(timeout=2000):
+            return False
+    except Exception:
+        return False
+
+    if debug:
+        log_event("[debug] Blocked/notice page detected — clicking 'ホームへ' to try to recover")
+
+    try:
+        home_button.click(timeout=5000)
+        page.wait_for_load_state("networkidle")
+    except Exception as e:
+        if debug:
+            log_event(f"[debug] Clicking home button failed: {e}")
+        return False
+
     try:
         content = page.content()
     except Exception:
-        return  # if we can't even read the page, let the normal error path handle it
-    for keyword in MAINTENANCE_KEYWORDS:
-        if keyword in content:
-            raise MaintenanceDetected(
-                f"Site shows a maintenance notice (matched keyword: {keyword!r}) at {page.url}"
-            )
+        return False
+
+    if _matched_maintenance_keyword(content):
+        return False  # still stuck even after clicking home
+
+    if debug:
+        log_event("[debug] Recovered — back on a normal page after clicking home button")
+    return True
+
+
+def check_for_maintenance(page, debug=False) -> bool:
+    """Checks whether the current page is showing a maintenance/blocked
+    notice. If so, first tries clicking the 'ホームへ' recovery button:
+      - If that works, returns True (caller should treat this as 'we just
+        navigated back to the home page mid-flow, please restart from
+        there') instead of raising.
+      - If the notice is still showing (or there's no home button to
+        click), raises MaintenanceDetected as before.
+    Returns False if there was no maintenance/blocked notice at all."""
+    try:
+        content = page.content()
+    except Exception:
+        return False
+
+    keyword = _matched_maintenance_keyword(content)
+    if not keyword:
+        return False
+
+    if try_recover_via_home_button(page, debug=debug):
+        return True
+
+    raise MaintenanceDetected(
+        f"Site shows a maintenance/blocked notice (matched keyword: {keyword!r}) "
+        f"at {page.url}, and clicking the home button did not recover it."
+    )
 
 
 # ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
 
-def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
-    """Returns a list of (building_name, date, time_str) tuples found available for one park."""
+class _RestartBuildingCheck(Exception):
+    """Internal signal: we recovered from a blocked page mid-flow by
+    clicking 'ホームへ', which lands us back on index.jsp — so the per-park
+    flow (select purpose, select park, search, read calendar) needs to
+    start over from the top rather than continuing from wherever it was."""
+    pass
+
+
+MAX_RECOVERY_RESTARTS = 2  # how many times to restart a single park's check
+                            # after an in-flow recovery, before giving up
+
+
+def _check_building_once(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
+    """One attempt at checking a single park. Raises _RestartBuildingCheck if
+    a blocked page was recovered from mid-flow (caller should retry from the
+    top), or MaintenanceDetected if it couldn't recover at all."""
     found = set()
 
     page.goto(SEARCH_URL, wait_until="networkidle")
-    check_for_maintenance(page)
+    if check_for_maintenance(page, debug=debug):
+        # Recovered — we're freshly back on index.jsp now, same as if we'd
+        # just navigated here normally, so just carry on with this same
+        # attempt rather than restarting (no time wasted).
+        pass
 
     if debug:
         log_event(f"[debug] Loaded {page.url} (title: {page.title()!r}) before selecting purpose for {building_name}")
@@ -591,7 +674,14 @@ def check_building(page, building_name, building_code, today, current_year, curr
     # element after a re-render), #week-head will never appear and we want a
     # clear, specific error instead of a bare 30s timeout on inner_text.
     page.wait_for_load_state("networkidle")
-    check_for_maintenance(page)
+    if check_for_maintenance(page, debug=debug):
+        # Blocked on the RESULTS page specifically — this is the case where
+        # reloading the same URL kept failing but clicking home worked. We
+        # just clicked home and are back on index.jsp, so the rest of this
+        # attempt (which expects to be on the results page) can't continue.
+        # Signal the caller to restart this park's check from the top.
+        raise _RestartBuildingCheck()
+
     try:
         page.wait_for_selector("#week-head", state="visible", timeout=15000)
     except PlaywrightTimeoutError:
@@ -646,6 +736,32 @@ def check_building(page, building_name, building_code, today, current_year, curr
         page.wait_for_timeout(1500)
 
     return sorted(found)
+
+
+def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
+    """Returns a list of (building_name, date, time_str) tuples found
+    available for one park. Retries from the top (up to
+    MAX_RECOVERY_RESTARTS times) if a blocked page is recovered from
+    mid-flow via the home button."""
+    for restart_num in range(MAX_RECOVERY_RESTARTS + 1):
+        try:
+            return _check_building_once(
+                page, building_name, building_code, today, current_year,
+                current_month, time_filter, weekend_unrestricted, debug=debug,
+            )
+        except _RestartBuildingCheck:
+            if debug:
+                log_event(
+                    f"[debug] Recovered from a blocked page mid-flow for "
+                    f"{building_name}, restarting this park's check "
+                    f"(attempt {restart_num + 2}/{MAX_RECOVERY_RESTARTS + 1})"
+                )
+            continue
+
+    raise MaintenanceDetected(
+        f"Kept hitting a blocked page for {building_name} even after "
+        f"{MAX_RECOVERY_RESTARTS} home-button recovery attempts."
+    )
 
 
 def check_availability(watch: dict, weekend_all_day: set, headless: bool = True, debug: bool = False):
