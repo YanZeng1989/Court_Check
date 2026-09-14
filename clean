@@ -1,0 +1,1 @@
+gh run list --repo YanZeng1989/Court_Check --workflow=check-court.yml --limit 300 --json databaseId --jq '.[].databaseId' | xargs -n1 -I{} gh run delete {} --repo YanZeng1989/Court_Check
