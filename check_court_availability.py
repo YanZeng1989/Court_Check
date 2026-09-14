@@ -510,7 +510,15 @@ def attach_ajax_logger(page, debug: bool):
 # Keywords that indicate the site itself is showing a maintenance notice
 # rather than the normal reservation UI. Kept broad but specific enough to
 # avoid false positives on ordinary error messages.
-MAINTENANCE_KEYWORDS = ["メンテナンス", "メンテナンス中", "只今の時間は", "サービスを一時停止"]
+MAINTENANCE_KEYWORDS = [
+    "メンテナンス",
+    "メンテナンス中",
+    "只今の時間は",
+    "サービスを一時停止",
+    "現在、ご指定のページはアクセスできません",  # "this page can't be accessed right now"
+    "しばらく経ってから、アクセスしてください",   # "please try again later"
+    "施設予約システムからのお知らせ",             # generic "notice from the reservation system" interstitial
+]
 
 
 class MaintenanceDetected(Exception):
