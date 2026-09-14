@@ -511,14 +511,20 @@ def attach_ajax_logger(page, debug: bool):
 # notice rather than the normal reservation UI. Kept broad but specific
 # enough to avoid false positives on ordinary error messages.
 MAINTENANCE_KEYWORDS = [
-    "メンテナンス",
-    "メンテナンス中",
-    "只今の時間は",
-    "サービスを一時停止",
     "現在、ご指定のページはアクセスできません",  # "this page can't be accessed right now"
     "しばらく経ってから、アクセスしてください",   # "please try again later"
-    "施設予約システムからのお知らせ",             # generic "notice from the reservation system" interstitial
+    "施設予約システムからのお知らせ",             # the blocked interstitial's own page heading/title
 ]
+# NOTE: we deliberately do NOT match on bare words like "メンテナンス" —
+# the site's normal homepage has a "お知らせ" (notices) list that includes
+# routine, HISTORICAL announcements mentioning past maintenance windows
+# (e.g. "2026/09/03 スポレクシステムのメンテナンスのお知らせ"). That text is
+# always there even when the site is working completely normally, so
+# matching on it caused false positives — the script kept thinking the
+# site was down for maintenance when it was actually fine. The three
+# phrases above are specific to the actual full-page "can't access this /
+# come back later" block we've verified only appears when something is
+# genuinely wrong.
 
 # The blocked/notice interstitial has a "ホームへ" (back to home) button that
 # just does location.href='/web/index.jsp'. Manually testing showed that
