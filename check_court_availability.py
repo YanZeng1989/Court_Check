@@ -688,6 +688,29 @@ MAINTENANCE_RETRY_WAIT_SECONDS = 5 * 60  # how long to pause before retrying
 MAINTENANCE_MAX_RETRIES = 1              # retry once, then give up for this run
 
 
+def gha_flag_incomplete_run(message: str):
+    """Marks this run as 'didn't actually complete a real check' WITHOUT
+    making the job fail — so it never triggers GitHub's failure-notification
+    emails. Instead:
+      - Prints a '::warning::' line, which makes GitHub Actions show a
+        yellow warning triangle on the run in the Actions list.
+      - Appends to the run's step summary (if running in GitHub Actions),
+        so the reason is visible right at the top of the run page without
+        having to open the raw log.
+    Call this any time the script exits early without having actually
+    checked the calendar, so you never mistake a blocked/broken run for a
+    real 'no availability' result.
+    """
+    print(f"::warning::{message}")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(f"### ⚠️ {message}\n\n")
+        except Exception:
+            pass
+
+
 def main():
     config = load_config()
     rotate_log_if_new_day(config["_log_retention_days"])
@@ -704,19 +727,23 @@ def main():
             break
         except MaintenanceDetected as e:
             if attempt >= MAINTENANCE_MAX_RETRIES:
-                # Give up for this run — not an error, no Telegram
-                # notification, exit code 0. The next scheduled run (per
-                # your GitHub Actions cron) will try again naturally.
-                log_event(
-                    f"Site still under maintenance after {attempt + 1} attempt(s), "
-                    f"giving up for this run: {e}"
+                # Give up for this run. Exit code stays 0 (no failure email),
+                # but gha_flag_incomplete_run() makes sure this doesn't look
+                # like a normal successful "checked, nothing available" run.
+                msg = (
+                    f"网站疑似维护/拦截，本次未能完成实际检查（重试 {attempt + 1} 次后放弃）："
+                    f"{e}"
                 )
+                log_event(msg)
+                gha_flag_incomplete_run(msg)
                 return
             log_event(f"Site under maintenance: {e}. Waiting {MAINTENANCE_RETRY_WAIT_SECONDS // 60} minutes before retrying...")
             time.sleep(MAINTENANCE_RETRY_WAIT_SECONDS)
             attempt += 1
         except Exception as e:
-            log_event(f"Error while checking availability: {e}")
+            msg = f"脚本出错，本次未能完成实际检查：{e}"
+            log_event(msg)
+            gha_flag_incomplete_run(msg)
             return
 
     if not slots:
