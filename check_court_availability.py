@@ -103,6 +103,7 @@ import os
 import re
 import sys
 import json
+import time
 import datetime
 import urllib.request
 import urllib.parse
@@ -675,27 +676,40 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
 # Main
 # ---------------------------------------------------------------------------
 
+MAINTENANCE_RETRY_WAIT_SECONDS = 5 * 60  # how long to pause before retrying
+MAINTENANCE_MAX_RETRIES = 1              # retry once, then give up for this run
+
+
 def main():
     config = load_config()
     rotate_log_if_new_day(config["_log_retention_days"])
 
-    try:
-        slots = check_availability(
-            config["_watch"],
-            config["_weekend_all_day"],
-            headless=not config["_headed"],
-            debug=config["_debug"],
-        )
-    except MaintenanceDetected as e:
-        # Quiet skip: not an error, no Telegram notification, exit code 0.
-        # The site is under maintenance right now — the next scheduled run
-        # (per your GitHub Actions cron, e.g. ~30 minutes later) will just
-        # try again naturally.
-        log_event(f"Site under maintenance, skipping this run: {e}")
-        return
-    except Exception as e:
-        log_event(f"Error while checking availability: {e}")
-        return
+    attempt = 0
+    while True:
+        try:
+            slots = check_availability(
+                config["_watch"],
+                config["_weekend_all_day"],
+                headless=not config["_headed"],
+                debug=config["_debug"],
+            )
+            break
+        except MaintenanceDetected as e:
+            if attempt >= MAINTENANCE_MAX_RETRIES:
+                # Give up for this run — not an error, no Telegram
+                # notification, exit code 0. The next scheduled run (per
+                # your GitHub Actions cron) will try again naturally.
+                log_event(
+                    f"Site still under maintenance after {attempt + 1} attempt(s), "
+                    f"giving up for this run: {e}"
+                )
+                return
+            log_event(f"Site under maintenance: {e}. Waiting {MAINTENANCE_RETRY_WAIT_SECONDS // 60} minutes before retrying...")
+            time.sleep(MAINTENANCE_RETRY_WAIT_SECONDS)
+            attempt += 1
+        except Exception as e:
+            log_event(f"Error while checking availability: {e}")
+            return
 
     if not slots:
         log_event("No availability this run.")
