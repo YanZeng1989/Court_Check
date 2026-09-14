@@ -20,11 +20,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Hard cap on how long a single run may take. If the site hangs and the
-    # script doesn't return in time, GitHub kills this run at 10 minutes
-    # instead of letting it (and everything queued behind it) stall
-    # indefinitely. The next scheduled run then proceeds normally.
-    timeout-minutes: 10
+    # Hard cap on how long a single run may take. Bumped to 15 because the
+    # script itself can now sleep 5 minutes and retry once if it detects a
+    # site maintenance page — 10 minutes was too tight a margin for that.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
