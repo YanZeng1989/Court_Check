@@ -121,37 +121,51 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
 DEBUG_SCREENSHOT_PATH = os.path.join(SCRIPT_DIR, "debug_error.png")
 DEBUG_HTML_PATH = os.path.join(SCRIPT_DIR, "debug_error.html")
 
-PURPOSE_VALUE = "1000_1030"  # テニス（人工芝）
+# Purpose ("sport category") codes, as seen in the #purpose-home dropdown
+PURPOSE_ARTIFICIAL_TURF = "1000_1030"  # テニス（人工芝）
+PURPOSE_HARD_COURT = "1000_1020"       # テニス（ハード）
 
-# Park name -> building code. Add more here if the site adds more parks.
-BUILDING_CODES = {
-    "日比谷公園": "1000",
-    "芝公園": "1010",
-    "猿江恩賜公園": "1040",
-    "亀戸中央公園": "1050",
-    "木場公園": "1060",
-    "祖師谷公園": "1070",
-    "東白鬚公園": "1090",
-    "浮間公園": "1100",
-    "城北中央公園": "1110",
-    "赤塚公園": "1120",
-    "東綾瀬公園": "1130",
-    "舎人公園": "1140",
-    "篠崎公園Ａ": "1150",
-    "大島小松川公園": "1160",
-    "汐入公園": "1170",
-    "高井戸公園": "1175",
-    "善福寺川緑地": "1180",
-    "光が丘公園": "1190",
-    "石神井公園Ｂ": "1205",
-    "井の頭恩賜公園": "1220",
-    "武蔵野中央公園": "1230",
-    "小金井公園": "1240",
-    "野川公園": "1260",
-    "府中の森公園": "1270",
-    "東大和南公園": "1280",
-    "大井ふ頭海浜公園Ｂ": "1315",
-    "有明テニスＣ人工芝コート": "1360",
+# Park/facility name -> (purpose_value, building_code). The building
+# dropdown (#bname-home) is refiltered by the site depending on which
+# purpose is selected, and for most parks the same building id works
+# under either purpose — EXCEPT Ariake, where each court type is its own
+# separate facility with its own id. So we store the purpose alongside
+# the building code per entry, rather than assuming one global purpose.
+BUILDING_INFO = {
+    # --- テニス（人工芝） (artificial turf) ---
+    "日比谷公園": (PURPOSE_ARTIFICIAL_TURF, "1000"),
+    "芝公園": (PURPOSE_ARTIFICIAL_TURF, "1010"),
+    "猿江恩賜公園": (PURPOSE_ARTIFICIAL_TURF, "1040"),
+    "亀戸中央公園": (PURPOSE_ARTIFICIAL_TURF, "1050"),
+    "木場公園": (PURPOSE_ARTIFICIAL_TURF, "1060"),
+    "祖師谷公園": (PURPOSE_ARTIFICIAL_TURF, "1070"),
+    "東白鬚公園": (PURPOSE_ARTIFICIAL_TURF, "1090"),
+    "浮間公園": (PURPOSE_ARTIFICIAL_TURF, "1100"),
+    "城北中央公園": (PURPOSE_ARTIFICIAL_TURF, "1110"),
+    "赤塚公園": (PURPOSE_ARTIFICIAL_TURF, "1120"),
+    "東綾瀬公園": (PURPOSE_ARTIFICIAL_TURF, "1130"),
+    "舎人公園": (PURPOSE_ARTIFICIAL_TURF, "1140"),
+    "篠崎公園Ａ": (PURPOSE_ARTIFICIAL_TURF, "1150"),
+    "大島小松川公園": (PURPOSE_ARTIFICIAL_TURF, "1160"),
+    "汐入公園": (PURPOSE_ARTIFICIAL_TURF, "1170"),
+    "高井戸公園": (PURPOSE_ARTIFICIAL_TURF, "1175"),
+    "善福寺川緑地": (PURPOSE_ARTIFICIAL_TURF, "1180"),
+    "光が丘公園": (PURPOSE_ARTIFICIAL_TURF, "1190"),
+    "石神井公園Ｂ": (PURPOSE_ARTIFICIAL_TURF, "1205"),
+    "井の頭恩賜公園": (PURPOSE_ARTIFICIAL_TURF, "1220"),
+    "武蔵野中央公園": (PURPOSE_ARTIFICIAL_TURF, "1230"),
+    "小金井公園": (PURPOSE_ARTIFICIAL_TURF, "1240"),
+    "野川公園": (PURPOSE_ARTIFICIAL_TURF, "1260"),
+    "府中の森公園": (PURPOSE_ARTIFICIAL_TURF, "1270"),
+    "東大和南公園": (PURPOSE_ARTIFICIAL_TURF, "1280"),
+    "大井ふ頭海浜公園Ｂ": (PURPOSE_ARTIFICIAL_TURF, "1315"),
+    "有明テニスＣ人工芝コート": (PURPOSE_ARTIFICIAL_TURF, "1360"),
+
+    # --- テニス（ハード） (hard court) ---
+    "大井ふ頭海浜公園Ａ（ハード）": (PURPOSE_HARD_COURT, "1310"),
+    "大井ふ頭海浜公園Ｂ（ハード）": (PURPOSE_HARD_COURT, "1315"),
+    "有明テニスＡ屋外ハードコート": (PURPOSE_HARD_COURT, "1350"),
+    "有明テニスＢインドアコート": (PURPOSE_HARD_COURT, "1370"),
 }
 
 # Calendar time-slot code (the part of a cell id after the underscore,
@@ -242,10 +256,10 @@ def load_config() -> dict:
         for name in building_names:
             watch[name] = set(time_filter)
 
-    unknown_parks = [name for name in watch if name not in BUILDING_CODES]
+    unknown_parks = [name for name in watch if name not in BUILDING_INFO]
     if unknown_parks:
         print(f"Unknown park name(s): {', '.join(unknown_parks)}")
-        print(f"Supported names: {', '.join(BUILDING_CODES.keys())}")
+        print(f"Supported names: {', '.join(BUILDING_INFO.keys())}")
         sys.exit(1)
 
     all_times = set()
@@ -261,10 +275,10 @@ def load_config() -> dict:
 
     weekend_raw = config.get("WEEKEND_ALL_DAY", "").strip()
     weekend_all_day = {name.strip() for name in weekend_raw.split(",") if name.strip()}
-    unknown_weekend = [name for name in weekend_all_day if name not in BUILDING_CODES]
+    unknown_weekend = [name for name in weekend_all_day if name not in BUILDING_INFO]
     if unknown_weekend:
         print(f"Unknown park name(s) in WEEKEND_ALL_DAY: {', '.join(unknown_weekend)}")
-        print(f"Supported names: {', '.join(BUILDING_CODES.keys())}")
+        print(f"Supported names: {', '.join(BUILDING_INFO.keys())}")
         sys.exit(1)
     config["_weekend_all_day"] = weekend_all_day
 
@@ -645,7 +659,7 @@ MAX_RECOVERY_RESTARTS = 2  # how many times to restart a single park's check
                             # after an in-flow recovery, before giving up
 
 
-def _check_building_once(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
+def _check_building_once(page, building_name, purpose_value, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
     """One attempt at checking a single park. Raises _RestartBuildingCheck if
     a blocked page was recovered from mid-flow (caller should retry from the
     top), or MaintenanceDetected if it couldn't recover at all."""
@@ -674,11 +688,11 @@ def _check_building_once(page, building_name, building_code, today, current_year
             "(set DEBUG=true in config.txt) to see what the page showed."
         )
 
-    page.select_option("#purpose-home", PURPOSE_VALUE)
+    page.select_option("#purpose-home", purpose_value)
     page.wait_for_timeout(1000)
 
     try:
-        page.wait_for_selector("#bname-home", state="visible", timeout=10000)
+        page.wait_for_selector("#bname-home:not([disabled])", state="visible", timeout=15000)
         page.select_option("#bname-home", building_code)
     except PlaywrightTimeoutError:
         if debug:
@@ -762,7 +776,7 @@ def _check_building_once(page, building_name, building_code, today, current_year
     return sorted(found)
 
 
-def check_building(page, building_name, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
+def check_building(page, building_name, purpose_value, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
     """Returns a list of (building_name, date, time_str) tuples found
     available for one park. Retries from the top (up to
     MAX_RECOVERY_RESTARTS times) if a blocked page is recovered from
@@ -770,7 +784,7 @@ def check_building(page, building_name, building_code, today, current_year, curr
     for restart_num in range(MAX_RECOVERY_RESTARTS + 1):
         try:
             return _check_building_once(
-                page, building_name, building_code, today, current_year,
+                page, building_name, purpose_value, building_code, today, current_year,
                 current_month, time_filter, weekend_unrestricted, debug=debug,
             )
         except _RestartBuildingCheck:
@@ -801,10 +815,10 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
 
         try:
             for name, time_filter in watch.items():
-                code = BUILDING_CODES[name]
+                purpose_value, code = BUILDING_INFO[name]
                 weekend_unrestricted = name in weekend_all_day
                 all_found.extend(
-                    check_building(page, name, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
+                    check_building(page, name, purpose_value, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
                 )
         except MaintenanceDetected:
             # Not a bug — nothing useful to screenshot, and no need to treat
