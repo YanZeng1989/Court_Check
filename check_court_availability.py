@@ -657,6 +657,8 @@ class _RestartBuildingCheck(Exception):
 
 MAX_RECOVERY_RESTARTS = 2  # how many times to restart a single park's check
                             # after an in-flow recovery, before giving up
+RETRY_PAUSE_MS = 5000      # pause before retrying a failed park
+PARK_PAUSE_MS = 3000       # pause between parks, to avoid a request burst
 
 
 def _check_building_once(page, building_name, purpose_value, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
@@ -779,8 +781,12 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
 def check_building(page, building_name, purpose_value, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
     """Returns a list of (building_name, date, time_str) tuples found
     available for one park. Retries from the top (up to
-    MAX_RECOVERY_RESTARTS times) if a blocked page is recovered from
-    mid-flow via the home button."""
+    MAX_RECOVERY_RESTARTS times) both for the known "blocked interstitial"
+    case AND for generic failures (e.g. network-level errors like the site
+    briefly throttling/rejecting a request after a lot of sustained
+    traffic) — a single bad request for one park should not sacrifice the
+    whole park's check if trying again would likely succeed."""
+    last_error = None
     for restart_num in range(MAX_RECOVERY_RESTARTS + 1):
         try:
             return _check_building_once(
@@ -795,8 +801,19 @@ def check_building(page, building_name, purpose_value, building_code, today, cur
                     f"(attempt {restart_num + 2}/{MAX_RECOVERY_RESTARTS + 1})"
                 )
             continue
+        except MaintenanceDetected:
+            raise  # already retried internally; no point retrying again here
+        except Exception as e:
+            last_error = e
+            if restart_num < MAX_RECOVERY_RESTARTS:
+                log_event(
+                    f"(attempt {restart_num + 1} failed for {building_name}, "
+                    f"pausing then retrying: {e})"
+                )
+                page.wait_for_timeout(RETRY_PAUSE_MS)
+                continue
 
-    raise MaintenanceDetected(
+    raise last_error if last_error is not None else MaintenanceDetected(
         f"Kept hitting a blocked page for {building_name} even after "
         f"{MAX_RECOVERY_RESTARTS} home-button recovery attempts."
     )
@@ -807,29 +824,45 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
     current_month = today.month
     current_year = today.year
     all_found = []
+    failed_parks = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         page = browser.new_page()
         attach_ajax_logger(page, debug)
 
-        try:
-            for name, time_filter in watch.items():
-                purpose_value, code = BUILDING_INFO[name]
-                weekend_unrestricted = name in weekend_all_day
+        for name, time_filter in watch.items():
+            purpose_value, code = BUILDING_INFO[name]
+            weekend_unrestricted = name in weekend_all_day
+            try:
                 all_found.extend(
                     check_building(page, name, purpose_value, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
                 )
-        except MaintenanceDetected:
-            # Not a bug — nothing useful to screenshot, and no need to treat
-            # this like an error. Just stop checking the remaining parks.
-            raise
-        except Exception:
-            if debug:
-                save_debug_snapshot(page, "unhandled_error")
-            raise
-        finally:
-            browser.close()
+            except Exception as e:
+                # Isolate the failure to THIS park — log it and move on to
+                # the rest, rather than losing the whole run over one bad
+                # park. If every single park ends up failing, we treat that
+                # as a real site-wide problem below.
+                log_event(f"Skipping {name} this run after repeated failures: {e}")
+                if debug:
+                    save_debug_snapshot(page, f"gave_up_{name}")
+                failed_parks.append(name)
+                continue
+            # Small pause between parks to avoid sending a rapid burst of
+            # requests that might trigger throttling on the site's side.
+            page.wait_for_timeout(PARK_PAUSE_MS)
+
+        browser.close()
+
+    if failed_parks and len(failed_parks) == len(watch):
+        # Every single park failed — this looks like a site-wide problem
+        # (outage/throttling) rather than something specific to one park.
+        raise MaintenanceDetected(
+            f"All {len(watch)} parks failed this run: {', '.join(failed_parks)}"
+        )
+
+    if failed_parks:
+        log_event(f"Note: these parks could not be checked this run and were skipped: {failed_parks}")
 
     return all_found
 
