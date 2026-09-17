@@ -868,16 +868,198 @@ def check_availability(watch: dict, weekend_all_day: set, headless: bool = True,
 
 
 # ---------------------------------------------------------------------------
+# Notification helper
+# ---------------------------------------------------------------------------
+
+def notify_found_slots(
+    slots,
+    bot_token: str,
+    chat_id: str,
+    skip_on_rain: bool,
+    rain_threshold: int,
+):
+    """
+    Send notifications immediately, with ONE Telegram message per park.
+
+    If one park has multiple available slots, all of that park's slots are
+    combined into a single message. The caller invokes this function as soon
+    as that park's check finishes, so there is no need to wait for the other
+    parks.
+    """
+    if not slots:
+        return
+
+    # Group slots by park. Normally `slots` comes from one park, but keeping
+    # this grouping makes the helper safe if it is called with multiple parks.
+    slots_by_building = {}
+    for building_name, slot_date, slot_time in slots:
+        slots_by_building.setdefault(building_name, []).append(
+            (slot_date, slot_time)
+        )
+
+    # One Telegram message for EACH park.
+    for building_name, building_slots in slots_by_building.items():
+        notify_slots = []
+        skipped_slots = []
+
+        for slot_date, slot_time in building_slots:
+            label = f"{building_name} {slot_date} {slot_time}".strip()
+
+            if (
+                skip_on_rain
+                and not is_slot_weather_ok(
+                    slot_date,
+                    slot_time,
+                    rain_threshold,
+                )
+            ):
+                skipped_slots.append(label)
+            else:
+                notify_slots.append(label)
+
+        if skipped_slots:
+            log_event(
+                f"Skipped due to rain forecast: {skipped_slots}"
+            )
+
+        if not notify_slots:
+            log_event(
+                f"{building_name}: availability found, but every slot "
+                "was skipped due to rain forecast."
+            )
+            continue
+
+        text = (
+            "🎾 空きあり: テニス（人工芝）\n\n"
+            f"📍 {building_name}\n\n"
+            + "\n".join(f"• {slot}" for slot in notify_slots)
+            + f"\n\n{SEARCH_URL}"
+        )
+
+        send_telegram(
+            bot_token,
+            chat_id,
+            text,
+        )
+
+        log_event(
+            f"Availability found at {building_name}. "
+            f"Telegram message sent immediately for "
+            f"{len(notify_slots)} slot(s): {notify_slots}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Scraper / availability check
+# ---------------------------------------------------------------------------
+
+def check_availability(
+    watch: dict,
+    weekend_all_day: set,
+    headless: bool = True,
+    debug: bool = False,
+    on_slots_found=None,
+):
+    """
+    Check parks one by one.
+
+    As soon as a park finishes checking and has available slots,
+    `on_slots_found(found)` is called immediately. This means a Telegram
+    notification does NOT wait for all parks to finish checking.
+
+    Returns:
+        All slots found during this run.
+    """
+    today = datetime.date.today()
+    current_month = today.month
+    current_year = today.year
+    all_found = []
+    failed_parks = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        page = browser.new_page()
+        attach_ajax_logger(page, debug)
+
+        try:
+            for name, time_filter in watch.items():
+                purpose_value, code = BUILDING_INFO[name]
+                weekend_unrestricted = name in weekend_all_day
+
+                try:
+                    found = check_building(
+                        page,
+                        name,
+                        purpose_value,
+                        code,
+                        today,
+                        current_year,
+                        current_month,
+                        time_filter,
+                        weekend_unrestricted,
+                        debug=debug,
+                    )
+
+                    if found:
+                        log_event(
+                            f"Availability found at {name}: {found}"
+                        )
+
+                        all_found.extend(found)
+
+                        # IMPORTANT:
+                        # Notify immediately after THIS park is checked.
+                        # Do not wait for the remaining parks.
+                        if on_slots_found is not None:
+                            on_slots_found(found)
+
+                except Exception as e:
+                    # Isolate the failure to THIS park — log it and move on
+                    # to the rest rather than losing the whole run.
+                    log_event(
+                        f"Skipping {name} this run after repeated failures: {e}"
+                    )
+
+                    if debug:
+                        save_debug_snapshot(page, f"gave_up_{name}")
+
+                    failed_parks.append(name)
+                    continue
+
+                # Small pause between parks to avoid sending a rapid burst of
+                # requests that might trigger throttling on the site's side.
+                page.wait_for_timeout(PARK_PAUSE_MS)
+
+        finally:
+            browser.close()
+
+    if failed_parks and len(failed_parks) == len(watch):
+        # Every single park failed — this looks like a site-wide problem.
+        raise MaintenanceDetected(
+            f"All {len(watch)} parks failed this run: "
+            f"{', '.join(failed_parks)}"
+        )
+
+    if failed_parks:
+        log_event(
+            f"Note: these parks could not be checked this run "
+            f"and were skipped: {failed_parks}"
+        )
+
+    return all_found
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 MAINTENANCE_RETRY_WAIT_SECONDS = 30  # how long to pause before retrying.
-                                       # Shortened for now while diagnosing
-                                       # false positives — once confirmed
-                                       # real maintenance windows are being
-                                       # detected correctly, feel free to
-                                       # raise this back up (e.g. to 5*60).
-MAINTENANCE_MAX_RETRIES = 1              # retry once, then give up for this run
+                                     # Shortened for now while diagnosing
+                                     # false positives — once confirmed
+                                     # real maintenance windows are being
+                                     # detected correctly, feel free to
+                                     # raise this back up (e.g. to 5*60).
+MAINTENANCE_MAX_RETRIES = 1          # retry once, then give up for this run
 
 
 def gha_flag_incomplete_run(message: str):
@@ -907,7 +1089,19 @@ def main():
     config = load_config()
     rotate_log_if_new_day(config["_log_retention_days"])
 
+    # Callback used by check_availability(). It is called immediately after
+    # each individual park has been checked and availability is found.
+    def on_slots_found(slots):
+        notify_found_slots(
+            slots=slots,
+            bot_token=config["TELEGRAM_BOT_TOKEN"],
+            chat_id=config["TELEGRAM_CHAT_ID"],
+            skip_on_rain=config["_skip_on_rain"],
+            rain_threshold=config["_rain_threshold"],
+        )
+
     attempt = 0
+
     while True:
         try:
             slots = check_availability(
@@ -915,23 +1109,32 @@ def main():
                 config["_weekend_all_day"],
                 headless=not config["_headed"],
                 debug=config["_debug"],
+                on_slots_found=on_slots_found,
             )
             break
+
         except MaintenanceDetected as e:
             if attempt >= MAINTENANCE_MAX_RETRIES:
                 # Give up for this run. Exit code stays 0 (no failure email),
                 # but gha_flag_incomplete_run() makes sure this doesn't look
                 # like a normal successful "checked, nothing available" run.
                 msg = (
-                    f"网站疑似维护/拦截，本次未能完成实际检查（重试 {attempt + 1} 次后放弃）："
+                    f"网站疑似维护/拦截，本次未能完成实际检查"
+                    f"（重试 {attempt + 1} 次后放弃）："
                     f"{e}"
                 )
                 log_event(msg)
                 gha_flag_incomplete_run(msg)
                 return
-            log_event(f"Site under maintenance: {e}. Waiting {MAINTENANCE_RETRY_WAIT_SECONDS // 60} minutes before retrying...")
+
+            log_event(
+                f"Site under maintenance: {e}. Waiting "
+                f"{MAINTENANCE_RETRY_WAIT_SECONDS // 60} minutes "
+                "before retrying..."
+            )
             time.sleep(MAINTENANCE_RETRY_WAIT_SECONDS)
             attempt += 1
+
         except Exception as e:
             msg = f"脚本出错，本次未能完成实际检查：{e}"
             log_event(msg)
@@ -942,28 +1145,11 @@ def main():
         log_event("No availability this run.")
         return
 
-    notify_slots = []
-    skipped_slots = []
-    for building_name, slot_date, slot_time in slots:
-        label = f"{building_name} {slot_date} {slot_time}".strip()
-        if config["_skip_on_rain"] and not is_slot_weather_ok(slot_date, slot_time, config["_rain_threshold"]):
-            skipped_slots.append(label)
-        else:
-            notify_slots.append(label)
-
-    if skipped_slots:
-        log_event(f"Skipped due to rain forecast: {skipped_slots}")
-
-    if notify_slots:
-        text = (
-            "空きあり: テニス（人工芝）\n\n"
-            + "\n".join(notify_slots)
-            + f"\n\n{SEARCH_URL}"
-        )
-        send_telegram(config["TELEGRAM_BOT_TOKEN"], config["TELEGRAM_CHAT_ID"], text)
-        log_event(f"Availability found, Telegram message sent for: {notify_slots}")
-    else:
-        log_event("Availability found, but every slot was skipped due to rain forecast.")
+    # Notifications have already been sent immediately after each park was
+    # checked. At this point the full run is simply complete.
+    log_event(
+        f"Check completed. Total availability found: {len(slots)}"
+    )
 
 
 if __name__ == "__main__":
