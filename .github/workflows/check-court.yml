@@ -1,11 +1,12 @@
 name: Check tennis court availability
 
 on:
-  # No schedule — you trigger this yourself from the Actions tab whenever
-  # you want to check ("Run workflow" button). Nothing runs automatically.
+  # No schedule inside GitHub — triggered externally (e.g. by cron-job.org
+  # calling the workflow_dispatch API every 5 minutes). Also runnable
+  # manually from the Actions tab any time.
   workflow_dispatch: {}
 
-# Prevents overlapping runs if you happen to trigger it twice in a row.
+# Prevents overlapping runs if two triggers land close together.
 concurrency:
   group: check-court-availability
   cancel-in-progress: false
@@ -31,8 +32,8 @@ jobs:
           cat > config.txt << EOF
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
-          BUILDINGS=芝公園
-          DEBUG=true
+          WATCH=${{ secrets.WATCH }}
+          WEEKEND_ALL_DAY=${{ secrets.WEEKEND_ALL_DAY }}
           EOF
 
       - name: Run checker
