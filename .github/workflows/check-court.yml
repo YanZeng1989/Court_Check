@@ -48,5 +48,7 @@ jobs:
           path: |
             debug_error.png
             debug_error.html
+            debug_calendar_sample.png
+            debug_calendar_sample.html
             log.txt
           if-no-files-found: ignore
