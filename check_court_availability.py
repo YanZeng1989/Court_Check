@@ -523,7 +523,16 @@ def dump_calendar_sample_once(page, building_name: str):
             f.write(page.content())
         page.screenshot(path=DEBUG_CALENDAR_SCREENSHOT_PATH, full_page=True)
 
-        cells = page.query_selector_all("td[onclick*='setReserv']")
+        # NOTE: the site's calendar <td> cells no longer carry an
+        # onclick="...setReserv..." attribute (confirmed via a debug dump
+        # on 2026-09-17) — clicking is apparently handled by a listener
+        # attached higher up rather than inline per-cell. Cells are still
+        # identified by id="YYYYMMDD_SS" (date_slotcode), so we match on
+        # that instead. `cells` here may include a few non-calendar <td>s
+        # with unrelated ids (e.g. header cells) — that's fine, the caller
+        # already validates the id format (8-digit date + known slot code)
+        # before using anything.
+        cells = page.query_selector_all("td[id]")
         suffixes = set()
         for c in cells:
             cell_id = c.get_attribute("id")
@@ -561,11 +570,13 @@ def attach_ajax_logger(page, debug: bool):
     AJAX call actually fires, and what it comes back with, without needing
     to reproduce the site locally.
 
-    NOTE: response bodies are logged IN FULL (not truncated) while we're
-    diagnosing an issue where some time-of-day slots may never be getting
-    requested/rendered at all. If these logs get too noisy/large once
-    things are working again, consider reintroducing a truncation limit
-    (e.g. body[:2000])."""
+    Response bodies are truncated to 500 chars to keep the log readable —
+    this was temporarily widened to the full body while diagnosing the
+    2026-09-17 issue (root cause found: the calendar <td> cells had lost
+    their onclick="...setReserv..." attribute after a site redesign; see
+    dump_calendar_sample_once()). Widen it again (e.g. body[:2000] or
+    body[:] for no limit) if you need to dig into a future AJAX-shaped
+    issue."""
     if not debug:
         return
 
@@ -579,9 +590,10 @@ def attach_ajax_logger(page, debug: bool):
                 body = response.text()
             except Exception as e:
                 body = f"(could not read body: {e})"
+            snippet = body[:500].replace("\n", " ")
             log_event(
                 f"[debug][ajax<-] {response.status} {response.url} "
-                f"body={body!r}"
+                f"body[:500]={snippet!r}"
             )
 
     page.on("request", on_request)
@@ -820,7 +832,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         if year != current_year or month != current_month:
             break
 
-        for cell in page.query_selector_all("td[onclick*='setReserv']"):
+        for cell in page.query_selector_all("td[id]"):
             cell_id = cell.get_attribute("id")
             if not cell_id or "_" not in cell_id:
                 continue
