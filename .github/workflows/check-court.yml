@@ -34,6 +34,7 @@ jobs:
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH=${{ secrets.WATCH }}
           WEEKEND_ALL_DAY=${{ secrets.WEEKEND_ALL_DAY }}
+           DEBUG=true
           EOF
 
       - name: Run checker
