@@ -84,6 +84,19 @@ Optional settings (add these lines if you want them):
         GitHub Actions) — turn this on any time you want to see what
         the page actually looked like when something broke.
 
+        DEBUG also turns on two extra diagnostics, unconditionally
+        (not just on error), which is useful right now while we're
+        tracking down a "some time slots never get checked" issue:
+          - Every AJAX response body is logged IN FULL (no longer
+            truncated to 500 chars).
+          - The very first time the calendar successfully loads for
+            the first park in this run, the script dumps the full
+            page HTML + a screenshot to debug_calendar_sample.html /
+            .png, and logs which time-slot codes it actually found
+            rendered as clickable cells. This tells us whether the
+            site is only rendering some time-of-day rows (e.g. only
+            9:00) by the time we read the DOM.
+
     HEADED=true
         If true, runs with a VISIBLE browser window instead of
         headless. Only works on your own machine with a display —
@@ -120,6 +133,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
 DEBUG_SCREENSHOT_PATH = os.path.join(SCRIPT_DIR, "debug_error.png")
 DEBUG_HTML_PATH = os.path.join(SCRIPT_DIR, "debug_error.html")
+
+# One-time diagnostic dump of the first successfully-loaded calendar page,
+# used while we're tracking down why some time slots never get detected.
+DEBUG_CALENDAR_HTML_PATH = os.path.join(SCRIPT_DIR, "debug_calendar_sample.html")
+DEBUG_CALENDAR_SCREENSHOT_PATH = os.path.join(SCRIPT_DIR, "debug_calendar_sample.png")
 
 # Purpose ("sport category") codes, as seen in the #purpose-home dropdown
 PURPOSE_ARTIFICIAL_TURF = "1000_1030"  # テニス（人工芝）
@@ -207,6 +225,11 @@ COOKIE_DIALOG_SELECTORS = [
     "#cookie-agree",
     ".modal-close",
 ]
+
+# Module-level flag: have we already done the one-time calendar diagnostic
+# dump this run? (Simpler and more explicit than stashing state on a
+# function object.) Reset at the top of check_availability() each run.
+_calendar_dump_done = False
 
 
 def load_config() -> dict:
@@ -305,10 +328,12 @@ def load_config() -> dict:
     else:
         config["_rain_threshold"] = DEFAULT_RAIN_THRESHOLD
 
-    # DEBUG only controls extra logging + a screenshot/HTML dump on error.
-    # It does NOT force a visible browser — headless CI runners (e.g. GitHub
-    # Actions) have no display and would crash if we tried. Screenshots work
-    # fine in headless mode too.
+    # DEBUG only controls extra logging + a screenshot/HTML dump on error
+    # (plus, for now, the full-body AJAX logging and the one-time calendar
+    # sample dump described at the top of this file). It does NOT force a
+    # visible browser — headless CI runners (e.g. GitHub Actions) have no
+    # display and would crash if we tried. Screenshots work fine in
+    # headless mode too.
     debug_raw = config.get("DEBUG", "false").strip().lower()
     config["_debug"] = debug_raw in ("true", "1", "yes", "on")
 
@@ -480,6 +505,43 @@ def save_debug_snapshot(page, label: str):
         log_event(f"[debug] Could not save debug snapshot: {snap_err}")
 
 
+def dump_calendar_sample_once(page, building_name: str):
+    """One-time (per run) diagnostic dump of a successfully-loaded calendar
+    page: full HTML, a screenshot, and which time-slot codes are actually
+    present as clickable cells right now. This is here specifically to
+    figure out whether the site is only rendering some time-of-day rows
+    (e.g. only 9:00) by the time we read the DOM, which would explain any
+    time slot silently never being checked regardless of real
+    availability. Safe to call every time; it no-ops after the first
+    successful dump in a given run."""
+    global _calendar_dump_done
+    if _calendar_dump_done:
+        return
+
+    try:
+        with open(DEBUG_CALENDAR_HTML_PATH, "w", encoding="utf-8") as f:
+            f.write(page.content())
+        page.screenshot(path=DEBUG_CALENDAR_SCREENSHOT_PATH, full_page=True)
+
+        cells = page.query_selector_all("td[onclick*='setReserv']")
+        suffixes = set()
+        for c in cells:
+            cell_id = c.get_attribute("id")
+            if cell_id and "_" in cell_id:
+                suffixes.add(cell_id.split("_", 1)[1])
+
+        log_event(
+            f"[debug] Dumped calendar sample for {building_name} -> "
+            f"{DEBUG_CALENDAR_HTML_PATH} / {DEBUG_CALENDAR_SCREENSHOT_PATH}. "
+            f"Found {len(cells)} setReserv cell(s); distinct time-slot "
+            f"codes present in the DOM right now: {sorted(suffixes)} "
+            f"(for reference, SLOT_TIMES = {SLOT_TIMES})"
+        )
+        _calendar_dump_done = True
+    except Exception as dump_err:
+        log_event(f"[debug] Calendar sample dump failed: {dump_err}")
+
+
 def dismiss_cookie_dialog_if_present(page):
     for selector in COOKIE_DIALOG_SELECTORS:
         try:
@@ -497,7 +559,13 @@ def attach_ajax_logger(page, debug: bool):
     """In debug mode, logs every request/response to a *.do endpoint (the
     site's server actions) so we can see whether the week/month calendar
     AJAX call actually fires, and what it comes back with, without needing
-    to reproduce the site locally."""
+    to reproduce the site locally.
+
+    NOTE: response bodies are logged IN FULL (not truncated) while we're
+    diagnosing an issue where some time-of-day slots may never be getting
+    requested/rendered at all. If these logs get too noisy/large once
+    things are working again, consider reintroducing a truncation limit
+    (e.g. body[:2000])."""
     if not debug:
         return
 
@@ -511,10 +579,9 @@ def attach_ajax_logger(page, debug: bool):
                 body = response.text()
             except Exception as e:
                 body = f"(could not read body: {e})"
-            snippet = body[:500].replace("\n", " ")
             log_event(
                 f"[debug][ajax<-] {response.status} {response.url} "
-                f"body[:500]={snippet!r}"
+                f"body={body!r}"
             )
 
     page.on("request", on_request)
@@ -736,6 +803,14 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             "debug_error.html (set DEBUG=true) to see what actually rendered."
         )
 
+    # Diagnostic only (see dump_calendar_sample_once docstring): does
+    # nothing after the first successful dump in a run. This is here to
+    # figure out whether the site is only rendering some time-of-day rows
+    # (e.g. only 9:00) by the time we get here, before we ever touch the
+    # week-by-week loop below.
+    if debug:
+        dump_calendar_sample_once(page, building_name)
+
     for _ in range(MAX_WEEKS_TO_CHECK):
         header_text = page.inner_text("#week-head")  # e.g. "2026年7月"
         m = re.search(r"(\d+)年(\d+)月", header_text)
@@ -817,54 +892,6 @@ def check_building(page, building_name, purpose_value, building_code, today, cur
         f"Kept hitting a blocked page for {building_name} even after "
         f"{MAX_RECOVERY_RESTARTS} home-button recovery attempts."
     )
-
-
-def check_availability(watch: dict, weekend_all_day: set, headless: bool = True, debug: bool = False):
-    today = datetime.date.today()
-    current_month = today.month
-    current_year = today.year
-    all_found = []
-    failed_parks = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page()
-        attach_ajax_logger(page, debug)
-
-        for name, time_filter in watch.items():
-            purpose_value, code = BUILDING_INFO[name]
-            weekend_unrestricted = name in weekend_all_day
-            try:
-                all_found.extend(
-                    check_building(page, name, purpose_value, code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=debug)
-                )
-            except Exception as e:
-                # Isolate the failure to THIS park — log it and move on to
-                # the rest, rather than losing the whole run over one bad
-                # park. If every single park ends up failing, we treat that
-                # as a real site-wide problem below.
-                log_event(f"Skipping {name} this run after repeated failures: {e}")
-                if debug:
-                    save_debug_snapshot(page, f"gave_up_{name}")
-                failed_parks.append(name)
-                continue
-            # Small pause between parks to avoid sending a rapid burst of
-            # requests that might trigger throttling on the site's side.
-            page.wait_for_timeout(PARK_PAUSE_MS)
-
-        browser.close()
-
-    if failed_parks and len(failed_parks) == len(watch):
-        # Every single park failed — this looks like a site-wide problem
-        # (outage/throttling) rather than something specific to one park.
-        raise MaintenanceDetected(
-            f"All {len(watch)} parks failed this run: {', '.join(failed_parks)}"
-        )
-
-    if failed_parks:
-        log_event(f"Note: these parks could not be checked this run and were skipped: {failed_parks}")
-
-    return all_found
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +997,9 @@ def check_availability(
     Returns:
         All slots found during this run.
     """
+    global _calendar_dump_done
+    _calendar_dump_done = False  # allow one fresh diagnostic dump per run
+
     today = datetime.date.today()
     current_month = today.month
     current_year = today.year
