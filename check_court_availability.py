@@ -1121,8 +1121,12 @@ def check_availability(
     resume — the whole list gets checked every time).
 
     Returns:
-        All slots found during this run (from every park checked before
-        the run stopped, per the mode above).
+        (all_found, notified_found) — every slot found this run, and the
+        subset of those that actually resulted in a Telegram message.
+        These differ whenever a slot was found but filtered out before
+        sending (currently: SKIP_ON_RAIN), which is exactly the case
+        that's confusing to read in the logs if you only report the
+        first number.
     """
     global _calendar_dump_done
     _calendar_dump_done = False  # allow one fresh diagnostic dump per run
@@ -1131,6 +1135,7 @@ def check_availability(
     current_month = today.month
     current_year = today.year
     all_found = []
+    notified_found = []  # subset of all_found that actually got notified
     failed_parks = []
 
     # Rotate the check order so early-stop-on-first-find (below) doesn't
@@ -1204,6 +1209,8 @@ def check_availability(
                             if on_slots_found is not None
                             else True
                         )
+                        if notified:
+                            notified_found.extend(found)
 
                         if stop_on_first_find and notified:
                             # Stop checking the rest of the watched parks
@@ -1287,7 +1294,7 @@ def check_availability(
             f"and were skipped: {failed_parks}"
         )
 
-    return all_found
+    return all_found, notified_found
 
 
 # ---------------------------------------------------------------------------
@@ -1348,7 +1355,7 @@ def main():
 
     while True:
         try:
-            slots = check_availability(
+            slots, notified_slots = check_availability(
                 config["_watch"],
                 config["_weekend_all_day"],
                 headless=not config["_headed"],
@@ -1391,10 +1398,22 @@ def main():
         return
 
     # Notifications have already been sent immediately after each park was
-    # checked. At this point the full run is simply complete.
-    log_event(
-        f"Check completed. Total availability found: {len(slots)}"
-    )
+    # checked. Report BOTH numbers: "found" counts what was open on the
+    # site, "notified" counts what actually reached you. They differ when
+    # a slot was found but filtered out before sending (SKIP_ON_RAIN) —
+    # reporting only the first number makes an unnotified run look like a
+    # notified one.
+    if notified_slots:
+        log_event(
+            f"Check completed. Availability found: {len(slots)}; "
+            f"notified: {len(notified_slots)}"
+        )
+    else:
+        log_event(
+            f"Check completed. Availability found: {len(slots)}, but "
+            f"NONE were notified (all filtered out — see the rain-skip "
+            f"lines above). No Telegram message was sent this run."
+        )
 
 
 if __name__ == "__main__":
