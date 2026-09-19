@@ -6,10 +6,18 @@ on:
   # manually from the Actions tab any time.
   workflow_dispatch: {}
 
-# Prevents overlapping runs if two triggers land close together.
+# Prevents overlapping runs if two triggers land close together. This
+# matters more than ever now: two runs racing would both read the same
+# next_park_state.txt and could commit conflicting/duplicate rotation
+# updates.
 concurrency:
   group: check-court-availability
   cancel-in-progress: false
+
+# Needed so the "Persist rotation state" step below can push a commit
+# back to this repo (next_park_state.txt).
+permissions:
+  contents: write
 
 jobs:
   check:
@@ -24,7 +32,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright
+          pip install playwright jpholiday
           playwright install --with-deps chromium
 
       - name: Write config.txt from secrets
@@ -39,6 +47,24 @@ jobs:
 
       - name: Run checker
         run: python check_court_availability.py
+
+      - name: Persist rotation state
+        # Commits next_park_state.txt back to the repo so the NEXT run
+        # (which starts from a fresh checkout) knows where this run left
+        # off — see NEXT_PARK_STATE_PATH in check_court_availability.py.
+        # `if: always()` so this still runs (and the resume point still
+        # gets saved) even if the checker step above hit an error.
+        if: always()
+        run: |
+          if [ -f next_park_state.txt ] && ! git diff --quiet -- next_park_state.txt; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add next_park_state.txt
+            git commit -m "chore: update park check rotation state [skip ci]"
+            git push
+          else
+            echo "No rotation-state change to commit."
+          fi
 
       - name: Upload debug artifacts (only present if something failed)
         if: always()
