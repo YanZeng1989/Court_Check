@@ -36,11 +36,13 @@ Optional settings (add these lines if you want them):
         If WATCH is set, it overrides BUILDINGS and TIMES below.
 
     WEEKEND_ALL_DAY=芝公園
-        Comma-separated list of park names where, on Saturdays and
-        Sundays, the normal time filter (from WATCH or TIMES) is
-        ignored and ANY available time counts. Weekdays for that park
-        still follow the normal filter. Leave unset if you don't need
-        this.
+        Comma-separated list of park names where, on Saturdays, Sundays,
+        AND Japanese public holidays (法定節日／祝日 — checked via the
+        jpholiday library, so e.g. a holiday that falls on a Wednesday
+        counts too), the normal time filter (from WATCH or TIMES) is
+        ignored and ANY available time counts. Ordinary (non-holiday)
+        weekdays for that park still follow the normal filter. Leave
+        unset if you don't need this.
 
     BUILDINGS=芝公園,日比谷公園
         Simple case: same time filter for every park. Comma-separated
@@ -121,6 +123,7 @@ import datetime
 import urllib.request
 import urllib.parse
 
+import jpholiday
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ---------------------------------------------------------------------------
@@ -197,6 +200,11 @@ SLOT_TIMES = {
     "60": "19:00",
 }
 
+# Monday=0 ... Sunday=6 (matches date.weekday()), used to show the day of
+# the week next to each date in Telegram notifications so it's easier to
+# tell at a glance whether a slot is on a weekday or weekend.
+WEEKDAY_KANJI = ["月", "火", "水", "木", "金", "土", "日"]
+
 DEFAULT_BUILDING = "芝公園"
 
 # Tokyo center coordinates, used for the rain check (SKIP_ON_RAIN)
@@ -210,6 +218,22 @@ DEFAULT_RAIN_THRESHOLD = 30  # percent
 LOG_PATH = os.path.join(SCRIPT_DIR, "log.txt")
 ROTATION_MARKER_PATH = os.path.join(SCRIPT_DIR, ".last_log_rotation")
 DEFAULT_LOG_RETENTION_DAYS = 7
+
+# Which watched park to START checking from next run. This file is
+# committed back into the repo by the GitHub Actions workflow after each
+# run (see the "Persist rotation state" step), because a fresh
+# `actions/checkout` gives us a clean working directory every time — a
+# plain temp file here would NOT survive between runs on its own.
+#
+# Why this exists: check_availability() stops checking further parks as
+# soon as ANY park has an available slot (so you get notified — and can
+# go book — as fast as possible, see check_availability()'s docstring).
+# Without this rotation, whichever park happens to be checked first would
+# "starve out" the rest forever: if that park keeps having openings, the
+# later-listed parks in WATCH would never get checked again. Rotating the
+# starting point each run guarantees every watched park eventually gets a
+# turn, while still keeping the "stop at the first find" speed benefit.
+NEXT_PARK_STATE_PATH = os.path.join(SCRIPT_DIR, "next_park_state.txt")
 
 MAX_WEEKS_TO_CHECK = 6  # safety cap; loop also stops once it leaves the current month
 
@@ -343,6 +367,23 @@ def load_config() -> dict:
     headed_raw = config.get("HEADED", "false").strip().lower()
     config["_headed"] = headed_raw in ("true", "1", "yes", "on")
 
+    # STOP_ON_FIRST_FIND=true (default): as soon as ANY watched park has an
+    # available slot, notify immediately and stop checking the rest of the
+    # watched parks for this run (they'll be checked next run — see the
+    # rotation logic in check_availability so this doesn't starve
+    # later-listed parks). Prioritizes speed: fewer seconds between "a slot
+    # opened up" and "you got the Telegram message", at the cost of not
+    # checking every park every run.
+    #
+    # STOP_ON_FIRST_FIND=false: check EVERY watched park every run,
+    # regardless of what earlier ones found. Still notifies immediately
+    # (one Telegram message per park) the moment each park's check
+    # finishes and has availability — it just doesn't stop the run early.
+    # Slower per run (checks all parks every time) but guarantees every
+    # park gets checked on every single run.
+    stop_on_first_find_raw = config.get("STOP_ON_FIRST_FIND", "true").strip().lower()
+    config["_stop_on_first_find"] = stop_on_first_find_raw not in ("false", "0", "no", "off")
+
     return config
 
 
@@ -419,6 +460,32 @@ def rotate_log(retention_days: int):
                 f.writelines(kept_lines)
         except Exception:
             pass
+
+
+def load_next_park_name():
+    """Returns the park name saved (by save_next_park_name) at the end of
+    the previous run, or None if there's no saved state yet (first-ever
+    run, or the state file was deleted/never committed)."""
+    if not os.path.exists(NEXT_PARK_STATE_PATH):
+        return None
+    try:
+        with open(NEXT_PARK_STATE_PATH, "r", encoding="utf-8") as f:
+            name = f.read().strip()
+        return name or None
+    except Exception as e:
+        log_event(f"(could not read {NEXT_PARK_STATE_PATH}: {e})")
+        return None
+
+
+def save_next_park_name(name: str):
+    """Records which park the NEXT run should start checking from. The
+    GitHub Actions workflow commits this file back into the repo after
+    each run so it actually persists (see NEXT_PARK_STATE_PATH)."""
+    try:
+        with open(NEXT_PARK_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write(name)
+    except Exception as e:
+        log_event(f"(could not write {NEXT_PARK_STATE_PATH}: {e})")
 
 
 # ---------------------------------------------------------------------------
@@ -846,9 +913,15 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
                 continue
 
             slot_time = SLOT_TIMES.get(slot_code)
-            is_weekend = slot_date.weekday() >= 5
+            # "Weekend" here also counts Japanese public holidays (法定
+            #節日/祝日) via jpholiday — e.g. a Wednesday that's a national
+            # holiday is treated the same as a Saturday for the
+            # WEEKEND_ALL_DAY exemption below.
+            is_weekend_or_holiday = (
+                slot_date.weekday() >= 5 or jpholiday.is_holiday(slot_date)
+            )
             if time_filter and slot_time not in time_filter:
-                if not (weekend_unrestricted and is_weekend):
+                if not (weekend_unrestricted and is_weekend_or_holiday):
                     continue
 
             img = cell.query_selector("img.calendar-status")
@@ -942,7 +1015,8 @@ def notify_found_slots(
         skipped_slots = []
 
         for slot_date, slot_time in building_slots:
-            label = f"{building_name} {slot_date} {slot_time}".strip()
+            weekday_kanji = WEEKDAY_KANJI[slot_date.weekday()]
+            label = f"{building_name} {slot_date}({weekday_kanji}) {slot_time}".strip()
 
             if (
                 skip_on_rain
@@ -998,16 +1072,38 @@ def check_availability(
     headless: bool = True,
     debug: bool = False,
     on_slots_found=None,
+    stop_on_first_find: bool = True,
 ):
     """
     Check parks one by one.
 
     As soon as a park finishes checking and has available slots,
-    `on_slots_found(found)` is called immediately. This means a Telegram
-    notification does NOT wait for all parks to finish checking.
+    `on_slots_found(found)` is called immediately — a Telegram
+    notification does NOT wait for all parks to finish checking, in
+    EITHER mode below.
+
+    If stop_on_first_find is True (the config default, STOP_ON_FIRST_FIND):
+    as soon as that happens, this run STOPS checking the remaining watched
+    parks entirely (they'll simply get checked on the next scheduled
+    run) — the whole point is to get you a notification, and a chance to
+    book, as fast as possible, rather than spending more time checking
+    parks you may not even need anymore.
+
+    To keep that early-stop from starving out later-listed parks (if an
+    earlier park in WATCH keeps having openings, the ones after it in the
+    list would otherwise never get checked), each run RESUMES from
+    wherever the previous run left off rather than always starting from
+    the top of WATCH — see load_next_park_name()/save_next_park_name().
+
+    If stop_on_first_find is False: every watched park gets checked every
+    run, no matter what earlier ones found — you may get several separate
+    Telegram messages in one run (one per park with availability), and
+    the rotation/resume logic above simply isn't used (there's nothing to
+    resume — the whole list gets checked every time).
 
     Returns:
-        All slots found during this run.
+        All slots found during this run (from every park checked before
+        the run stopped, per the mode above).
     """
     global _calendar_dump_done
     _calendar_dump_done = False  # allow one fresh diagnostic dump per run
@@ -1018,13 +1114,34 @@ def check_availability(
     all_found = []
     failed_parks = []
 
+    # Rotate the check order so early-stop-on-first-find (below) doesn't
+    # always favor whichever park happens to be listed first in WATCH.
+    # `names` is the fixed order as configured; `rotated_names` is what we
+    # actually iterate this run, starting wherever the last run left off.
+    # None of this matters when stop_on_first_find is False — every park
+    # gets checked every run regardless of order, so we just use the
+    # configured order as-is.
+    names = list(watch.keys())
+    if stop_on_first_find:
+        saved_start_name = load_next_park_name()
+        if saved_start_name in names:
+            start_index = names.index(saved_start_name)
+        else:
+            # No saved state yet (first run ever), or the saved park is no
+            # longer in WATCH (config changed) — just start from the top.
+            start_index = 0
+        rotated_names = names[start_index:] + names[:start_index]
+    else:
+        rotated_names = names
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         page = browser.new_page()
         attach_ajax_logger(page, debug)
 
         try:
-            for name, time_filter in watch.items():
+            for name in rotated_names:
+                time_filter = watch[name]
                 purpose_value, code = BUILDING_INFO[name]
                 weekend_unrestricted = name in weekend_all_day
 
@@ -1051,9 +1168,37 @@ def check_availability(
 
                         # IMPORTANT:
                         # Notify immediately after THIS park is checked.
-                        # Do not wait for the remaining parks.
+                        # Do not wait for the remaining parks — this
+                        # happens regardless of stop_on_first_find.
                         if on_slots_found is not None:
                             on_slots_found(found)
+
+                        if stop_on_first_find:
+                            # Stop checking the rest of the watched parks
+                            # this run — you already have a slot to go
+                            # book, and every extra park checked is extra
+                            # time before you can act on it. The remaining
+                            # parks just get checked again on the next
+                            # scheduled run.
+                            #
+                            # Resume point for NEXT run: the park right
+                            # after this one, in the ORIGINAL (unrotated)
+                            # order — not index 0 — so a park that keeps
+                            # having openings can't starve out the ones
+                            # listed after it forever.
+                            next_start = names[(names.index(name) + 1) % len(names)]
+                            save_next_park_name(next_start)
+
+                            log_event(
+                                f"Stopping this run early after finding "
+                                f"availability at {name} — not checking "
+                                f"the remaining watched parks. Next run "
+                                f"will start from {next_start}."
+                            )
+                            break
+                        # else: STOP_ON_FIRST_FIND=false — notification
+                        # already sent above, just fall through and keep
+                        # checking the remaining parks below.
 
                 except Exception as e:
                     # Isolate the failure to THIS park — log it and move on
@@ -1071,6 +1216,16 @@ def check_availability(
                 # Small pause between parks to avoid sending a rapid burst of
                 # requests that might trigger throttling on the site's side.
                 page.wait_for_timeout(PARK_PAUSE_MS)
+
+            else:
+                # Loop finished WITHOUT an early break — every watched park
+                # got checked this run (found or not). Full cycle done, so
+                # next run can just start from the top again. (Only
+                # meaningful in stop_on_first_find mode — when it's False
+                # every run always checks everyone anyway, so there's no
+                # rotation state to maintain.)
+                if stop_on_first_find:
+                    save_next_park_name(names[0])
 
         finally:
             browser.close()
@@ -1152,6 +1307,7 @@ def main():
                 headless=not config["_headed"],
                 debug=config["_debug"],
                 on_slots_found=on_slots_found,
+                stop_on_first_find=config["_stop_on_first_find"],
             )
             break
 
