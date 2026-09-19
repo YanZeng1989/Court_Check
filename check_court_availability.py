@@ -989,7 +989,7 @@ def notify_found_slots(
     chat_id: str,
     skip_on_rain: bool,
     rain_threshold: int,
-):
+) -> bool:
     """
     Send notifications immediately, with ONE Telegram message per park.
 
@@ -997,9 +997,19 @@ def notify_found_slots(
     combined into a single message. The caller invokes this function as soon
     as that park's check finishes, so there is no need to wait for the other
     parks.
+
+    Returns:
+        True if at least one Telegram message was actually sent. False if
+        `slots` was empty, or every slot found was skipped (currently only
+        possible reason: SKIP_ON_RAIN). Callers use this to tell "we found
+        something and told you" apart from "we found something but it
+        wasn't actually worth telling you about" — see how
+        stop_on_first_find uses this in check_availability().
     """
     if not slots:
-        return
+        return False
+
+    notified_anything = False
 
     # Group slots by park. Normally `slots` comes from one park, but keeping
     # this grouping makes the helper safe if it is called with multiple parks.
@@ -1060,6 +1070,9 @@ def notify_found_slots(
             f"Telegram message sent immediately for "
             f"{len(notify_slots)} slot(s): {notify_slots}"
         )
+        notified_anything = True
+
+    return notified_anything
 
 
 # ---------------------------------------------------------------------------
@@ -1083,11 +1096,17 @@ def check_availability(
     EITHER mode below.
 
     If stop_on_first_find is True (the config default, STOP_ON_FIRST_FIND):
-    as soon as that happens, this run STOPS checking the remaining watched
-    parks entirely (they'll simply get checked on the next scheduled
-    run) — the whole point is to get you a notification, and a chance to
-    book, as fast as possible, rather than spending more time checking
-    parks you may not even need anymore.
+    as soon as `on_slots_found` reports that it actually sent a
+    notification, this run STOPS checking the remaining watched parks
+    entirely (they'll simply get checked on the next scheduled run) — the
+    whole point is to get you a notification, and a chance to book, as
+    fast as possible, rather than spending more time checking parks you
+    may not even need anymore. Note this is keyed on an actual
+    notification being sent, NOT merely on raw availability being found:
+    e.g. SKIP_ON_RAIN can cause `on_slots_found` to find real
+    availability and still send nothing, in which case we do NOT stop —
+    stopping there would waste the whole run (no message went out, and
+    the rest of WATCH never got checked either).
 
     To keep that early-stop from starving out later-listed parks (if an
     earlier park in WATCH keeps having openings, the ones after it in the
@@ -1170,10 +1189,23 @@ def check_availability(
                         # Notify immediately after THIS park is checked.
                         # Do not wait for the remaining parks — this
                         # happens regardless of stop_on_first_find.
-                        if on_slots_found is not None:
+                        #
+                        # on_slots_found returns whether it actually sent a
+                        # Telegram message. "Found" alone isn't enough to
+                        # justify stopping early — e.g. SKIP_ON_RAIN can
+                        # find real availability and still send nothing.
+                        # Stopping (and rotating past this park) in that
+                        # case would waste the whole run: no notification
+                        # went out, AND the remaining watched parks never
+                        # got checked. So we only stop when something was
+                        # actually sent.
+                        notified = (
                             on_slots_found(found)
+                            if on_slots_found is not None
+                            else True
+                        )
 
-                        if stop_on_first_find:
+                        if stop_on_first_find and notified:
                             # Stop checking the rest of the watched parks
                             # this run — you already have a slot to go
                             # book, and every extra park checked is extra
@@ -1196,6 +1228,18 @@ def check_availability(
                                 f"will start from {next_start}."
                             )
                             break
+                        elif stop_on_first_find:
+                            # Found availability, but on_slots_found sent
+                            # no actual message (e.g. every slot was
+                            # rain-skipped) — don't treat this as a stop
+                            # condition or advance the rotation. Keep
+                            # checking the remaining watched parks this
+                            # run, same as if nothing had been found here.
+                            log_event(
+                                f"{name} had availability but nothing was "
+                                f"actually notified — continuing to check "
+                                f"the remaining watched parks this run."
+                            )
                         # else: STOP_ON_FIRST_FIND=false — notification
                         # already sent above, just fall through and keep
                         # checking the remaining parks below.
@@ -1288,8 +1332,11 @@ def main():
 
     # Callback used by check_availability(). It is called immediately after
     # each individual park has been checked and availability is found.
+    # Its return value (whether a Telegram message was actually sent) is
+    # what check_availability uses to decide whether to stop early — see
+    # the comment above `notified = on_slots_found(found)` there.
     def on_slots_found(slots):
-        notify_found_slots(
+        return notify_found_slots(
             slots=slots,
             bot_token=config["TELEGRAM_BOT_TOKEN"],
             chat_id=config["TELEGRAM_CHAT_ID"],
