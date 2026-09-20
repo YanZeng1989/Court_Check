@@ -52,9 +52,10 @@ Optional settings (add these lines if you want them):
 
     TIMES=15:00,17:00,19:00
         Goes with BUILDINGS above: comma-separated list of time slots
-        you want to be notified about (from: 09:00, 11:00, 13:00,
-        15:00, 17:00, 19:00). If not set, any time counts. Ignored if
-        WATCH is set.
+        you want to be notified about (from: 09:00, 11:00, 13:00, 15:00,
+        17:00, 19:00 for artificial-turf parks; hard courts — 有明
+        テニスＡ／Ｂ, 大井ふ頭ハード — also open at 07:00). If not set,
+        any time counts. Ignored if WATCH is set.
 
     LOG_RETENTION_DAYS=7
         The script keeps a running log.txt of every check. Once a day
@@ -190,8 +191,22 @@ BUILDING_INFO = {
 }
 
 # Calendar time-slot code (the part of a cell id after the underscore,
-# e.g. "..._30") -> human-readable time
-SLOT_TIMES = {
+# e.g. "..._30") -> human-readable time.
+#
+# IMPORTANT: this mapping is NOT the same for every court type. Confirmed
+# from the site's own AJAX responses (tzoneNo/tzoneName), by comparing an
+# artificial-turf park against 有明テニスＡ屋外ハードコート on the same day:
+#   tzoneNo:  10    20    30    40    50    60    70
+#   turf:   09:00 11:00 13:00 15:00 17:00 19:00   —
+#   hard:   07:00 09:00 11:00 13:00 15:00 17:00 19:00
+# Hard courts (有明 A/B, 大井ふ頭 hard) open two hours earlier than turf
+# courts (7:00 vs 9:00) and close at the same time, so they have a 7th
+# slot (code "70") that simply doesn't exist for turf courts. A single
+# shared dict here previously mislabeled every hard-court slot by 2 hours
+# and silently dropped the real 19:00 slot entirely (code "70" wasn't in
+# the dict, so it resolved to no time at all) — see
+# _slot_times_for_purpose() for how callers pick the right one.
+SLOT_TIMES_TURF = {
     "10": "09:00",
     "20": "11:00",
     "30": "13:00",
@@ -199,6 +214,33 @@ SLOT_TIMES = {
     "50": "17:00",
     "60": "19:00",
 }
+
+SLOT_TIMES_HARD = {
+    "10": "07:00",
+    "20": "09:00",
+    "30": "11:00",
+    "40": "13:00",
+    "50": "15:00",
+    "60": "17:00",
+    "70": "19:00",
+}
+
+# Backwards-compatible alias: several places (comments, the debug dump)
+# still refer to "SLOT_TIMES" generically for validity/logging purposes
+# where the turf/hard distinction doesn't matter (e.g. "is this string a
+# real slot-time value at all"). Actual lookups during scraping MUST go
+# through _slot_times_for_purpose(), not this directly.
+SLOT_TIMES = SLOT_TIMES_TURF
+
+
+def _slot_times_for_purpose(purpose_value: str) -> dict:
+    """Returns the correct cell-id-suffix -> time-of-day dict for the
+    given purpose (PURPOSE_ARTIFICIAL_TURF vs PURPOSE_HARD_COURT) — see
+    the comment above SLOT_TIMES_TURF/SLOT_TIMES_HARD for why these
+    differ."""
+    if purpose_value == PURPOSE_HARD_COURT:
+        return SLOT_TIMES_HARD
+    return SLOT_TIMES_TURF
 
 # Monday=0 ... Sunday=6 (matches date.weekday()), used to show the day of
 # the week next to each date in Telegram notifications so it's easier to
@@ -309,14 +351,14 @@ def load_config() -> dict:
         print(f"Supported names: {', '.join(BUILDING_INFO.keys())}")
         sys.exit(1)
 
-    all_times = set()
-    for times in watch.values():
-        all_times |= times
-    unknown_times = [t for t in all_times if t not in SLOT_TIMES.values()]
-    if unknown_times:
-        print(f"Unknown time(s): {', '.join(unknown_times)}")
-        print(f"Supported times: {', '.join(SLOT_TIMES.values())}")
-        sys.exit(1)
+    for name, times in watch.items():
+        purpose_value = BUILDING_INFO[name][0]
+        valid_times = set(_slot_times_for_purpose(purpose_value).values())
+        unknown_times = [t for t in times if t not in valid_times]
+        if unknown_times:
+            print(f"Unknown time(s) for {name}: {', '.join(unknown_times)}")
+            print(f"Supported times for {name}: {', '.join(sorted(valid_times))}")
+            sys.exit(1)
 
     config["_watch"] = watch
 
@@ -507,11 +549,37 @@ def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER
         probs = data.get("hourly", {}).get("precipitation_probability", [])
         result = {}
         for t, p in zip(times, probs):
+            # The API can return `null` for hours it doesn't have a
+            # forecast for yet (e.g. right at the edge of its ~16-day
+            # forecast horizon) even on an otherwise-successful request —
+            # skip those rather than let a None sneak into the probability
+            # list downstream (it would otherwise blow up the max()/<
+            # comparison in is_slot_weather_ok).
+            if p is None:
+                continue
             hour = int(t.split("T")[1].split(":")[0])
             result[hour] = p
-        return result or None
+
+        if not result:
+            # This is NOT the same as a request failure (no exception was
+            # raised — we got HTTP 200 back). It just means the API had
+            # nothing usable for this date, most likely because it's
+            # beyond Open-Meteo's forecast horizon (~16 days out). This
+            # used to return None here with NO log line at all, which made
+            # "the rain check silently never ran" indistinguishable from
+            # "the rain check ran and said it's fine" — logging it
+            # explicitly here is the fix for that.
+            log_event(
+                f"[weather] No usable hourly precipitation data returned "
+                f"for {date_str} (request succeeded but came back empty — "
+                f"likely beyond the forecast horizon). Rain check will be "
+                f"skipped for this date."
+            )
+            return None
+
+        return result
     except Exception as e:
-        log_event(f"(weather forecast fetch failed for {date_str}: {e})")
+        log_event(f"[weather] Forecast fetch failed for {date_str}: {e}")
         return None
 
 
@@ -526,6 +594,14 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
 
     hourly_probs = _get_hourly_rain_probabilities(slot_date)
     if hourly_probs is None:
+        # No usable forecast (see the log line in
+        # _get_hourly_rain_probabilities for why) — we genuinely can't
+        # judge the weather, so we don't block the notification on it.
+        # Logged explicitly so this is never silent.
+        log_event(
+            f"[weather] {slot_date} {slot_time}: no forecast available, "
+            f"notifying WITHOUT a rain check."
+        )
         return True
 
     window_start = start_hour - WEATHER_BUFFER_HOURS
@@ -535,9 +611,22 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
         if h in hourly_probs
     ]
     if not relevant_probs:
+        log_event(
+            f"[weather] {slot_date} {slot_time}: forecast data didn't "
+            f"cover the {window_start}:00-{window_end}:00 window at all, "
+            f"notifying WITHOUT a rain check."
+        )
         return True
 
-    return max(relevant_probs) < threshold
+    max_prob = max(relevant_probs)
+    is_ok = max_prob < threshold
+    log_event(
+        f"[weather] {slot_date} {slot_time}: max precipitation "
+        f"probability in the {window_start}:00-{window_end}:00 window "
+        f"is {max_prob}% (threshold {threshold}%) -> "
+        f"{'OK, will notify' if is_ok else 'too high, will skip'}"
+    )
+    return is_ok
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +700,9 @@ def dump_calendar_sample_once(page, building_name: str):
             f"{DEBUG_CALENDAR_HTML_PATH} / {DEBUG_CALENDAR_SCREENSHOT_PATH}. "
             f"Found {len(cells)} setReserv cell(s); distinct time-slot "
             f"codes present in the DOM right now: {sorted(suffixes)} "
-            f"(for reference, SLOT_TIMES = {SLOT_TIMES})"
+            f"(for reference, SLOT_TIMES_TURF = {SLOT_TIMES_TURF}, "
+            f"SLOT_TIMES_HARD = {SLOT_TIMES_HARD} — which one applies "
+            f"depends on this park's court type)"
         )
         _calendar_dump_done = True
     except Exception as dump_err:
@@ -899,6 +990,11 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         if year != current_year or month != current_month:
             break
 
+        # Which cell-suffix -> time dict applies depends on court type
+        # (hard courts open 2 hours earlier and have an extra 7th slot —
+        # see the comment above SLOT_TIMES_TURF/SLOT_TIMES_HARD).
+        slot_times = _slot_times_for_purpose(purpose_value)
+
         for cell in page.query_selector_all("td[id]"):
             cell_id = cell.get_attribute("id")
             if not cell_id or "_" not in cell_id:
@@ -912,7 +1008,22 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             if slot_date <= today:
                 continue
 
-            slot_time = SLOT_TIMES.get(slot_code)
+            slot_time = slot_times.get(slot_code)
+            if slot_time is None:
+                # Unrecognized slot code for this court type. This used to
+                # silently fall through as an empty "" time (see
+                # SLOT_TIMES_TURF/SLOT_TIMES_HARD's history) — now that
+                # both known court schedules are covered, this should not
+                # normally happen. If it does (e.g. the site adds a new
+                # court type/schedule), skip the cell and log it once
+                # rather than notifying with a blank time again.
+                log_event(
+                    f"[warn] {building_name}: unrecognized time-slot code "
+                    f"{slot_code!r} for cell {cell_id!r} — skipping this "
+                    f"cell (not in {slot_times})."
+                )
+                continue
+
             # "Weekend" here also counts Japanese public holidays (法定
             #節日/祝日) via jpholiday — e.g. a Wednesday that's a national
             # holiday is treated the same as a Saturday for the
@@ -927,7 +1038,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             img = cell.query_selector("img.calendar-status")
             alt = img.get_attribute("alt") if img else ""
             if alt == "空き":
-                found.add((building_name, slot_date, slot_time or ""))
+                found.add((building_name, slot_date, slot_time))
 
         next_week_btn = page.query_selector("#next-week")
         if not next_week_btn:
