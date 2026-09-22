@@ -6,7 +6,7 @@ What it does
 1. Opens the PUBLIC search page for each park you list (no login needed
    just to check availability)
 2. For each park, searches テニス（人工芝） and walks forward week by
-   week through the calendar, staying within the CURRENT month
+   week through the calendar, covering THIS MONTH AND NEXT MONTH
 3. Looks for cells marked "空き" (available), only for dates strictly
    after today, and (optionally) only at times you care about
 4. If any open slot is found, sends a Telegram message to you (plain
@@ -277,7 +277,13 @@ DEFAULT_LOG_RETENTION_DAYS = 7
 # turn, while still keeping the "stop at the first find" speed benefit.
 NEXT_PARK_STATE_PATH = os.path.join(SCRIPT_DIR, "next_park_state.txt")
 
-MAX_WEEKS_TO_CHECK = 6  # safety cap; loop also stops once it leaves the current month
+MAX_WEEKS_TO_CHECK = 10  # safety cap; loop also stops once it leaves the
+                          # allowed month range (this month + next month —
+                          # see the max_year/max_month block in
+                          # _check_building_once). Worst case (today is
+                          # the 1st of a 31-day month, followed by another
+                          # 31-day month) needs up to ~9 weeks to reach the
+                          # end of next month, so this has a little margin.
 
 REQUIRED_KEYS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
 
@@ -981,13 +987,21 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
     if debug:
         dump_calendar_sample_once(page, building_name)
 
+    # Allow this month AND next month (previously: current month only).
+    # Tuple comparison below relies on this being the month right after
+    # current_month, wrapping December -> January correctly.
+    if current_month == 12:
+        max_year, max_month = current_year + 1, 1
+    else:
+        max_year, max_month = current_year, current_month + 1
+
     for _ in range(MAX_WEEKS_TO_CHECK):
         header_text = page.inner_text("#week-head")  # e.g. "2026年7月"
         m = re.search(r"(\d+)年(\d+)月", header_text)
         if not m:
             break
         year, month = int(m.group(1)), int(m.group(2))
-        if year != current_year or month != current_month:
+        if (year, month) > (max_year, max_month):
             break
 
         # Which cell-suffix -> time dict applies depends on court type
