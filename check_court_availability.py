@@ -73,6 +73,14 @@ Optional settings (add these lines if you want them):
         other slots with better weather still get notified normally.
         Set to "false" to always notify regardless of weather.
 
+        Within 14 days of today, this check is MANDATORY: if real
+        forecast data genuinely can't be obtained for a slot that
+        close (rare — should only happen on a forecast-provider
+        outage), the notification is BLOCKED rather than sent blind.
+        Beyond 14 days, no forecast exists yet for anyone (nobody can
+        see that far ahead), so a slot found that far out is notified
+        normally, without a rain check, exactly as before.
+
     RAIN_PROBABILITY_THRESHOLD=30
         Used with SKIP_ON_RAIN. The max acceptable rain probability
         (percent, 0-100) anywhere in the 6-hour window before a slot
@@ -589,6 +597,15 @@ def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER
         return None
 
 
+# Within this many days of today, the rain check is MANDATORY: if we
+# can't get real forecast data for a slot that close, we do NOT notify —
+# better to hold back than risk sending you out to a rained-out court
+# when we genuinely could have known better. Beyond this window, missing
+# data is expected (nobody's forecast reaches that far), so we notify
+# anyway rather than silently drop days/weeks' worth of legitimate finds.
+WEATHER_MANDATORY_WITHIN_DAYS = 14
+
+
 def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int) -> bool:
     if not slot_time or ":" not in slot_time:
         return True
@@ -598,15 +615,28 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
     except ValueError:
         return True
 
+    days_until = (slot_date - datetime.date.today()).days
+    within_mandatory_window = days_until <= WEATHER_MANDATORY_WITHIN_DAYS
+
     hourly_probs = _get_hourly_rain_probabilities(slot_date)
     if hourly_probs is None:
-        # No usable forecast (see the log line in
-        # _get_hourly_rain_probabilities for why) — we genuinely can't
-        # judge the weather, so we don't block the notification on it.
-        # Logged explicitly so this is never silent.
+        # See the log line inside _get_hourly_rain_probabilities for the
+        # specific reason (fetch error vs. "succeeded but empty", which is
+        # the normal case once you're past the forecast horizon).
+        if within_mandatory_window:
+            log_event(
+                f"[weather] {slot_date} {slot_time}: within "
+                f"{WEATHER_MANDATORY_WITHIN_DAYS} days ({days_until} days "
+                f"out) but no forecast data available — rain check is "
+                f"mandatory this close, so BLOCKING this notification "
+                f"rather than risk sending you to a rained-out court."
+            )
+            return False
         log_event(
-            f"[weather] {slot_date} {slot_time}: no forecast available, "
-            f"notifying WITHOUT a rain check."
+            f"[weather] {slot_date} {slot_time}: {days_until} days out, "
+            f"beyond the {WEATHER_MANDATORY_WITHIN_DAYS}-day mandatory "
+            f"window and no forecast data available (too far ahead for "
+            f"any forecast to exist) — notifying WITHOUT a rain check."
         )
         return True
 
@@ -617,9 +647,21 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
         if h in hourly_probs
     ]
     if not relevant_probs:
+        if within_mandatory_window:
+            log_event(
+                f"[weather] {slot_date} {slot_time}: within "
+                f"{WEATHER_MANDATORY_WITHIN_DAYS} days ({days_until} days "
+                f"out) but forecast data didn't cover the "
+                f"{window_start}:00-{window_end}:00 window at all — "
+                f"rain check is mandatory this close, so BLOCKING this "
+                f"notification."
+            )
+            return False
         log_event(
-            f"[weather] {slot_date} {slot_time}: forecast data didn't "
-            f"cover the {window_start}:00-{window_end}:00 window at all, "
+            f"[weather] {slot_date} {slot_time}: {days_until} days out, "
+            f"beyond the {WEATHER_MANDATORY_WITHIN_DAYS}-day mandatory "
+            f"window; forecast data didn't cover the "
+            f"{window_start}:00-{window_end}:00 window at all — "
             f"notifying WITHOUT a rain check."
         )
         return True
@@ -627,10 +669,10 @@ def is_slot_weather_ok(slot_date: datetime.date, slot_time: str, threshold: int)
     max_prob = max(relevant_probs)
     is_ok = max_prob < threshold
     log_event(
-        f"[weather] {slot_date} {slot_time}: max precipitation "
-        f"probability in the {window_start}:00-{window_end}:00 window "
-        f"is {max_prob}% (threshold {threshold}%) -> "
-        f"{'OK, will notify' if is_ok else 'too high, will skip'}"
+        f"[weather] {slot_date} {slot_time} ({days_until} days out): max "
+        f"precipitation probability in the {window_start}:00-"
+        f"{window_end}:00 window is {max_prob}% (threshold {threshold}%) "
+        f"-> {'OK, will notify' if is_ok else 'too high, will skip'}"
     )
     return is_ok
 
