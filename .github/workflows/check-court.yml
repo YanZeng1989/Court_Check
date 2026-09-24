@@ -59,29 +59,13 @@ jobs:
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH=${{ secrets.WATCH }}
           WEEKEND_ALL_DAY=${{ secrets.WEEKEND_ALL_DAY }}
-           DEBUG=true
+          DEBUG=false
           EOF
 
       - name: Run checker
+        env:
+          PARALLEL_WORKERS: "3"
         run: python check_court_availability.py
-
-      - name: Persist rotation state
-        # Commits next_park_state.txt back to the repo so the NEXT run
-        # (which starts from a fresh checkout) knows where this run left
-        # off — see NEXT_PARK_STATE_PATH in check_court_availability.py.
-        # `if: always()` so this still runs (and the resume point still
-        # gets saved) even if the checker step above hit an error.
-        if: always()
-        run: |
-          if [ -f next_park_state.txt ] && ! git diff --quiet -- next_park_state.txt; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add next_park_state.txt
-            git commit -m "chore: update park check rotation state [skip ci]"
-            git push
-          else
-            echo "No rotation-state change to commit."
-          fi
 
       - name: Upload debug artifacts (only present if something failed)
         if: always()
