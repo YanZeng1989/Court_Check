@@ -1062,20 +1062,35 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         # see the comment above SLOT_TIMES_TURF/SLOT_TIMES_HARD).
         slot_times = _slot_times_for_purpose(purpose_value)
 
-        # Tracks whether this week has ANY cell that's actually open for
-        # booking yet (any status other than "受付期間外" = outside the
-        # acceptance period). Checked regardless of your time filter,
-        # because this is about the SITE's booking window, not your
-        # preferences — see the early-exit after this cell loop.
-        week_had_any_relevant_cell = False
-        week_had_any_open_cell = False
-        week_alt_values_seen = set()  # debug-only, see log line below
+        # Read the whole calendar in ONE browser-side evaluation instead of
+        # doing several Playwright calls per <td>. This is noticeably faster
+        # because a calendar can contain dozens of cells.
+        raw_cells = page.locator("td[id]").evaluate_all(
+            """cells => cells.map(cell => {
+                const id = cell.id || "";
+                if (!id.includes("_")) return null;
+                const img = cell.querySelector("img.calendar-status");
+                return {
+                    id,
+                    alt: img ? (img.getAttribute("alt") || "") : ""
+                };
+            }).filter(Boolean)"""
+        )
 
-        for cell in page.query_selector_all("td[id]"):
-            cell_id = cell.get_attribute("id")
-            if not cell_id or "_" not in cell_id:
-                continue
-            date_str, slot_code = cell_id.split("_", 1)
+        # IMPORTANT:
+        # "受付期間外" means the DATE is not yet bookable. We aggregate
+        # status by date. If every slot for a future date is 受付期間外,
+        # later dates are also outside the rolling booking window, so STOP
+        # immediately. This is more precise and faster than waiting for an
+        # entire week to be closed.
+        #
+        # Do NOT stop merely because a date is full (e.g. "満") — later dates
+        # may still have availability.
+        date_statuses = {}
+        week_alt_values_seen = set()
+
+        for item in raw_cells:
+            date_str, slot_code = item["id"].split("_", 1)
             try:
                 slot_date = datetime.datetime.strptime(date_str, "%Y%m%d").date()
             except ValueError:
@@ -1086,35 +1101,21 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
 
             slot_time = slot_times.get(slot_code)
             if slot_time is None:
-                # Unrecognized slot code for this court type. This used to
-                # silently fall through as an empty "" time (see
-                # SLOT_TIMES_TURF/SLOT_TIMES_HARD's history) — now that
-                # both known court schedules are covered, this should not
-                # normally happen. If it does (e.g. the site adds a new
-                # court type/schedule), skip the cell and log it once
-                # rather than notifying with a blank time again.
-                log_event(
-                    f"[warn] {building_name}: unrecognized time-slot code "
-                    f"{slot_code!r} for cell {cell_id!r} — skipping this "
-                    f"cell (not in {slot_times})."
-                )
                 continue
 
-            img = cell.query_selector("img.calendar-status")
-            alt = img.get_attribute("alt") if img else ""
-
-            # Track booking-window status BEFORE the time-filter skip below
-            # — a cell you don't personally care about the time of still
-            # tells us whether this week is open for booking at all.
-            week_had_any_relevant_cell = True
+            alt = item["alt"]
             week_alt_values_seen.add(alt)
-            if alt != "受付期間外":
-                week_had_any_open_cell = True
 
-            # "Weekend" here also counts Japanese public holidays (法定
-            #節日/祝日) via jpholiday — e.g. a Wednesday that's a national
-            # holiday is treated the same as a Saturday for the
-            # WEEKEND_ALL_DAY exemption below.
+            status = date_statuses.setdefault(
+                slot_date,
+                {"total": 0, "outside": 0}
+            )
+            status["total"] += 1
+            if alt == "受付期間外":
+                status["outside"] += 1
+
+            # Apply the user's time filter only after booking-window status
+            # has been recorded.
             is_weekend_or_holiday = (
                 slot_date.weekday() >= 5 or jpholiday.is_holiday(slot_date)
             )
@@ -1125,33 +1126,54 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             if alt == "空き":
                 found.add((building_name, slot_date, slot_time))
 
-        if debug and week_had_any_relevant_cell:
+        if debug and date_statuses:
             log_event(
                 f"[debug] {building_name}: {year}年{month}月 week — "
-                f"distinct cell statuses seen: {sorted(week_alt_values_seen)}"
+                f"distinct cell statuses seen: {sorted(week_alt_values_seen)}; "
+                f"dates={len(date_statuses)}"
             )
 
-        if week_had_any_relevant_cell and not week_had_any_open_cell:
-            # The ENTIRE visible week is still outside the reservation
-            # acceptance period (受付期間外) — the site opens booking on a
-            # rolling window from near to far, so once we hit a week
-            # that's fully closed, every week after it (further in the
-            # future) is guaranteed to be closed too. No point spending
-            # more time/requests clicking further ahead this run — it'll
-            # just get checked again (and hopefully be open by then) on a
-            # later run once the window rolls forward.
+        # Stop at the FIRST future date whose complete set of court slots is
+        # outside the booking acceptance period. Because the booking window
+        # moves forward monotonically, every later date is also not bookable.
+        # Sort dates so boundary weeks are handled correctly.
+        stop_date = next(
+            (
+                d for d in sorted(date_statuses)
+                if date_statuses[d]["total"] > 0
+                and date_statuses[d]["outside"] == date_statuses[d]["total"]
+            ),
+            None,
+        )
+        if stop_date is not None:
             log_event(
-                f"{building_name}: {year}年{month}月 week is entirely "
-                f"outside the booking acceptance period (受付期間外) — "
-                f"stopping early instead of checking further weeks."
+                f"{building_name}: {stop_date} is entirely outside the "
+                f"booking acceptance period (受付期間外) — "
+                f"stopping; later dates will not be checked."
             )
             break
 
         next_week_btn = page.query_selector("#next-week")
         if not next_week_btn:
             break
+        # Wait for the calendar header to change instead of sleeping a fixed
+        # 1.5s. Fast responses continue immediately; slow responses still get
+        # enough time to render.
+        previous_header = header_text
         next_week_btn.click()
-        page.wait_for_timeout(1500)
+        try:
+            page.wait_for_function(
+                """previous => {
+                    const el = document.querySelector('#week-head');
+                    return el && el.innerText !== previous;
+                }""",
+                previous_header,
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            # Keep the old behavior as a safe fallback if the site updates
+            # the calendar without changing #week-head text in time.
+            page.wait_for_timeout(500)
 
     return sorted(found)
 
