@@ -1,23 +1,19 @@
 name: Check tennis court availability
 
 on:
-  # No schedule inside GitHub — triggered externally (e.g. by cron-job.org
-  # calling the workflow_dispatch API every 5 minutes). Also runnable
-  # manually from the Actions tab any time.
+  # Triggered externally through workflow_dispatch.
+  # Recommended external cadence for this 2-worker version: every 2 minutes.
   workflow_dispatch: {}
 
-# Prevents overlapping runs if two triggers land close together. This
-# matters more than ever now: two runs racing would both read the same
-# next_park_state.txt and could commit conflicting/duplicate rotation
-# updates.
+# Keep only one workflow run active at a time. Parallelism happens INSIDE
+# the Python process (2 park workers), avoiding a pile-up of overlapping
+# GitHub Actions runs hitting the reservation site at the same time.
 concurrency:
   group: check-court-availability
   cancel-in-progress: false
 
-# Needed so the "Persist rotation state" step below can push a commit
-# back to this repo (next_park_state.txt).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
@@ -29,6 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Python packages
         run: pip install playwright jpholiday
@@ -38,18 +35,12 @@ jobs:
         run: echo "version=$(playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright browser binary
-        id: pw-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
 
-      - name: Install Chromium (only downloads if the cache above missed)
-        # --with-deps installs the OS-level libraries chromium needs; that
-        # part is fast and safe to re-run every time (apt just no-ops if
-        # already satisfied). The slow part — downloading and unpacking
-        # the ~100MB Chromium binary itself — is what the cache above
-        # skips on a hit.
+      - name: Install Chromium
         run: playwright install --with-deps chromium
 
       - name: Write config.txt from secrets
@@ -64,10 +55,12 @@ jobs:
 
       - name: Run checker
         env:
-          PARALLEL_WORKERS: "3"
+          # Two simultaneous browsers was chosen after the 3-worker run showed
+          # #week-head timeouts on multiple Ariake courts.
+          PARALLEL_WORKERS: "2"
         run: python check_court_availability.py
 
-      - name: Upload debug artifacts (only present if something failed)
+      - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
