@@ -528,7 +528,7 @@ def load_config() -> dict:
     for name, times in watch.items():
         bad_format = [
             t for t in times
-            if not re.fullmatch(r"(?:[01]\\d|2[0-3]):[0-5]\\d", t)
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", t)
         ]
         if bad_format:
             print(f"Invalid time format(s) for {name}: {', '.join(bad_format)}")
