@@ -876,7 +876,10 @@ def try_recover_via_home_button(page, debug=False) -> bool:
 
     try:
         home_button.click(timeout=5000)
-        page.wait_for_load_state("networkidle")
+        # Same reasoning as elsewhere in this file — networkidle can hang
+        # even on a fully-usable page; domcontentloaded is the reliable
+        # signal here.
+        page.wait_for_load_state("domcontentloaded")
     except Exception as e:
         log_event(f"[maintenance-check] Clicking home button failed: {e}")
         return False
@@ -952,7 +955,15 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
     top), or MaintenanceDetected if it couldn't recover at all."""
     found = set()
 
-    page.goto(SEARCH_URL, wait_until="networkidle")
+    # NOTE: intentionally NOT wait_until="networkidle" — if the page has
+    # any ongoing background request (polling, analytics, etc.) that never
+    # goes idle, networkidle can hang for its full default timeout even
+    # though the page is completely usable well before that (confirmed via
+    # a debug screenshot: a "Timeout 30000ms exceeded" failure here showed
+    # a fully-rendered, interactive page). domcontentloaded is reliable and
+    # fast; the explicit #purpose-home wait right after this is the real
+    # readiness gate anyway.
+    page.goto(SEARCH_URL, wait_until="domcontentloaded")
     if check_for_maintenance(page, debug=debug):
         # Recovered — we're freshly back on index.jsp now, same as if we'd
         # just navigated here normally, so just carry on with this same
@@ -998,7 +1009,14 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
     # error, an alert() dialog, or the click landing on a stale/detached
     # element after a re-render), #week-head will never appear and we want a
     # clear, specific error instead of a bare 30s timeout on inner_text.
-    page.wait_for_load_state("networkidle")
+    # Same reasoning as the page.goto() above — a debug screenshot from a
+    # real "Timeout 30000ms exceeded" failure here showed the calendar
+    # already fully rendered and interactive, meaning networkidle was
+    # never actually going to resolve (some background request keeps the
+    # page from going fully idle) even though the page was long since
+    # ready. domcontentloaded plus the explicit #week-head wait right
+    # below is the real readiness gate.
+    page.wait_for_load_state("domcontentloaded")
     if check_for_maintenance(page, debug=debug):
         # Blocked on the RESULTS page specifically — this is the case where
         # reloading the same URL kept failing but clicking home worked. We
