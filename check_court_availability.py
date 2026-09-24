@@ -990,7 +990,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
     page.wait_for_timeout(1000)
 
     try:
-        page.wait_for_selector("#bname-home:not([disabled])", state="visible", timeout=15000)
+        page.wait_for_selector("#bname-home:not([disabled])", state="visible", timeout=25000)
         page.select_option("#bname-home", building_code)
     except PlaywrightTimeoutError:
         if debug:
@@ -1002,6 +1002,20 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         )
 
     page.wait_for_timeout(500)
+
+    # Confirmed via a debug screenshot: on a slow-loading park, #loadmsg (a
+    # loading overlay) can still be covering #btn-go well past our fixed
+    # 500ms wait, which made the click itself fail after Playwright spent
+    # its full default 30s retrying against an element that kept getting
+    # intercepted. Waiting explicitly for the overlay to be gone (or for
+    # this timeout, if the page has no such overlay at all right now) is a
+    # more direct fix than just hoping the click's own retry window is
+    # long enough.
+    try:
+        page.wait_for_selector("#loadmsg", state="hidden", timeout=20000)
+    except PlaywrightTimeoutError:
+        pass  # no #loadmsg on this page, or it's just taking a while —
+              # the click below will still retry on its own regardless.
     page.click("#btn-go")
 
     # This is the step that was previously a single hard-coded wait_for_timeout.
@@ -1026,7 +1040,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         raise _RestartBuildingCheck()
 
     try:
-        page.wait_for_selector("#week-head", state="visible", timeout=15000)
+        page.wait_for_selector("#week-head", state="visible", timeout=25000)
     except PlaywrightTimeoutError:
         if debug:
             save_debug_snapshot(page, f"week-head-not-visible_{building_name}")
