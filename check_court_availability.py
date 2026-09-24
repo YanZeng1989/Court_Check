@@ -130,6 +130,7 @@ import json
 import time
 import datetime
 import concurrent.futures
+import functools
 import threading
 import urllib.request
 import urllib.parse
@@ -550,6 +551,7 @@ def save_next_park_name(name: str):
 # Weather check
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=64)
 def _get_hourly_rain_probabilities(date_obj: datetime.date, lat: float = WEATHER_LAT, lon: float = WEATHER_LON):
     date_str = date_obj.isoformat()
     url = (
@@ -948,7 +950,7 @@ class _RestartBuildingCheck(Exception):
 MAX_RECOVERY_RESTARTS = 2  # how many times to restart a single park's check
                             # after an in-flow recovery, before giving up
 RETRY_PAUSE_MS = 5000      # pause before retrying a failed park
-PARK_PAUSE_MS = 3000       # pause between parks, to avoid a request burst
+PARK_PAUSE_MS = 3000       # legacy sequential-mode pause (parallel mode does not use it)
 
 
 def _check_building_once(page, building_name, purpose_value, building_code, today, current_year, current_month, time_filter, weekend_unrestricted, debug=False):
@@ -989,8 +991,9 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         )
 
     page.select_option("#purpose-home", purpose_value)
-    page.wait_for_timeout(1000)
 
+    # No fixed sleep here: the enabled building selector below is the real
+    # readiness signal, so fast responses continue immediately.
     try:
         page.wait_for_selector("#bname-home:not([disabled])", state="visible", timeout=25000)
         page.select_option("#bname-home", building_code)
@@ -1003,7 +1006,8 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             "triggered by changePurpose() that hadn't finished yet."
         )
 
-    page.wait_for_timeout(500)
+    # No fixed sleep after selecting the building either. The loading
+    # overlay wait below is the actual readiness gate.
 
     # Confirmed via a debug screenshot: on a slow-loading park, #loadmsg (a
     # loading overlay) can still be covering #btn-go well past our fixed
@@ -1184,8 +1188,36 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         next_week_btn = page.query_selector("#next-week")
         if not next_week_btn:
             break
+
+        # Wait for the calendar itself to change instead of sleeping a fixed
+        # 1500 ms. The first td[id] contains the visible week's date, so it
+        # changes when #next-week finishes. Fast site responses therefore
+        # continue immediately, while slow responses still get a generous
+        # timeout.
+        first_cell = page.query_selector("td[id]")
+        previous_first_id = first_cell.get_attribute("id") if first_cell else None
         next_week_btn.click()
-        page.wait_for_timeout(1500)
+        try:
+            if previous_first_id:
+                page.wait_for_function(
+                    """oldId => {
+                        const cell = document.querySelector('td[id]');
+                        return cell && cell.id && cell.id !== oldId;
+                    }""",
+                    arg=previous_first_id,
+                    timeout=10000,
+                )
+            else:
+                page.wait_for_selector("td[id]", state="attached", timeout=10000)
+        except PlaywrightTimeoutError:
+            # One last check is cheap; if the site did update in an unusual
+            # way, the next loop can still parse it. Otherwise the normal
+            # checks/retry path will handle the stale page.
+            if debug:
+                log_event(
+                    f"[debug] {building_name}: calendar did not visibly "
+                    "change within 10s after #next-week"
+                )
 
     return sorted(found)
 
@@ -1347,7 +1379,7 @@ def check_availability(
     longer delays checking the other parks.
 
     PARALLEL_WORKERS controls the maximum number of simultaneous park checks
-    (default 3). STOP_ON_FIRST_FIND is intentionally ignored in parallel
+    (default 2). STOP_ON_FIRST_FIND is intentionally ignored in parallel
     mode: once workers are running, cancelling the others would make some
     watched parks miss the current scan. Telegram is still sent immediately
     when an individual park finishes and has a qualifying slot.
@@ -1365,10 +1397,10 @@ def check_availability(
     # Keep concurrency deliberately modest so we gain latency without
     # hammering the reservation site with one browser per watched park.
     try:
-        workers = int(os.environ.get("PARALLEL_WORKERS", "3"))
+        workers = int(os.environ.get("PARALLEL_WORKERS", "2"))
     except ValueError:
-        workers = 3
-    workers = max(1, min(workers, len(names), 4))
+        workers = 2
+    workers = max(1, min(workers, len(names), 2))
 
     log_event(
         f"Parallel park checking enabled: {len(names)} park(s), "
