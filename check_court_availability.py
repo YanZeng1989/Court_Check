@@ -1043,6 +1043,17 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         if not m:
             break
         year, month = int(m.group(1)), int(m.group(2))
+        if debug:
+            # Print the RAW header text (not just the parsed year/month) —
+            # if a boundary week's header shows something like
+            # "2026年10月/11月", the regex above only ever captures the
+            # first "10月" and we'd never notice we're actually looking at
+            # a week that's spilled into next month, from this log alone.
+            log_event(
+                f"[debug] {building_name}: week header raw text "
+                f"{header_text!r} -> parsed as ({year}, {month}); "
+                f"allowed up to ({max_year}, {max_month})"
+            )
         if (year, month) > (max_year, max_month):
             break
 
@@ -1058,6 +1069,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         # preferences — see the early-exit after this cell loop.
         week_had_any_relevant_cell = False
         week_had_any_open_cell = False
+        week_alt_values_seen = set()  # debug-only, see log line below
 
         for cell in page.query_selector_all("td[id]"):
             cell_id = cell.get_attribute("id")
@@ -1095,6 +1107,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             # — a cell you don't personally care about the time of still
             # tells us whether this week is open for booking at all.
             week_had_any_relevant_cell = True
+            week_alt_values_seen.add(alt)
             if alt != "受付期間外":
                 week_had_any_open_cell = True
 
@@ -1111,6 +1124,12 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
 
             if alt == "空き":
                 found.add((building_name, slot_date, slot_time))
+
+        if debug and week_had_any_relevant_cell:
+            log_event(
+                f"[debug] {building_name}: {year}年{month}月 week — "
+                f"distinct cell statuses seen: {sorted(week_alt_values_seen)}"
+            )
 
         if week_had_any_relevant_cell and not week_had_any_open_cell:
             # The ENTIRE visible week is still outside the reservation
