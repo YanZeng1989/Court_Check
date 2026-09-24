@@ -129,6 +129,8 @@ import sys
 import json
 import time
 import datetime
+import concurrent.futures
+import threading
 import urllib.request
 import urllib.parse
 
@@ -1337,214 +1339,118 @@ def check_availability(
     on_slots_found=None,
     stop_on_first_find: bool = True,
 ):
-    """
-    Check parks one by one.
+    """Check watched parks concurrently and notify as each park finishes.
 
-    As soon as a park finishes checking and has available slots,
-    `on_slots_found(found)` is called immediately — a Telegram
-    notification does NOT wait for all parks to finish checking, in
-    EITHER mode below.
+    Each worker owns its own Playwright instance/browser/page.  Playwright's
+    synchronous API is not shared across threads.  This removes the old
+    sequential PARK_PAUSE_MS bottleneck and, importantly, a slow park no
+    longer delays checking the other parks.
 
-    If stop_on_first_find is True (the config default, STOP_ON_FIRST_FIND):
-    as soon as `on_slots_found` reports that it actually sent a
-    notification, this run STOPS checking the remaining watched parks
-    entirely (they'll simply get checked on the next scheduled run) — the
-    whole point is to get you a notification, and a chance to book, as
-    fast as possible, rather than spending more time checking parks you
-    may not even need anymore. Note this is keyed on an actual
-    notification being sent, NOT merely on raw availability being found:
-    e.g. SKIP_ON_RAIN can cause `on_slots_found` to find real
-    availability and still send nothing, in which case we do NOT stop —
-    stopping there would waste the whole run (no message went out, and
-    the rest of WATCH never got checked either).
-
-    To keep that early-stop from starving out later-listed parks (if an
-    earlier park in WATCH keeps having openings, the ones after it in the
-    list would otherwise never get checked), each run RESUMES from
-    wherever the previous run left off rather than always starting from
-    the top of WATCH — see load_next_park_name()/save_next_park_name().
-
-    If stop_on_first_find is False: every watched park gets checked every
-    run, no matter what earlier ones found — you may get several separate
-    Telegram messages in one run (one per park with availability), and
-    the rotation/resume logic above simply isn't used (there's nothing to
-    resume — the whole list gets checked every time).
-
-    Returns:
-        (all_found, notified_found) — every slot found this run, and the
-        subset of those that actually resulted in a Telegram message.
-        These differ whenever a slot was found but filtered out before
-        sending (currently: SKIP_ON_RAIN), which is exactly the case
-        that's confusing to read in the logs if you only report the
-        first number.
+    PARALLEL_WORKERS controls the maximum number of simultaneous park checks
+    (default 3). STOP_ON_FIRST_FIND is intentionally ignored in parallel
+    mode: once workers are running, cancelling the others would make some
+    watched parks miss the current scan. Telegram is still sent immediately
+    when an individual park finishes and has a qualifying slot.
     """
     global _calendar_dump_done
-    _calendar_dump_done = False  # allow one fresh diagnostic dump per run
+    _calendar_dump_done = False
 
     today = datetime.date.today()
     current_month = today.month
     current_year = today.year
-    all_found = []
-    notified_found = []  # subset of all_found that actually got notified
-    failed_parks = []
-
-    # Rotate the check order so early-stop-on-first-find (below) doesn't
-    # always favor whichever park happens to be listed first in WATCH.
-    # `names` is the fixed order as configured; `rotated_names` is what we
-    # actually iterate this run, starting wherever the last run left off.
-    # None of this matters when stop_on_first_find is False — every park
-    # gets checked every run regardless of order, so we just use the
-    # configured order as-is.
     names = list(watch.keys())
-    if stop_on_first_find:
-        saved_start_name = load_next_park_name()
-        if saved_start_name in names:
-            start_index = names.index(saved_start_name)
-        else:
-            # No saved state yet (first run ever), or the saved park is no
-            # longer in WATCH (config changed) — just start from the top.
-            start_index = 0
-        rotated_names = names[start_index:] + names[:start_index]
-    else:
-        rotated_names = names
+    if not names:
+        return [], []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page()
-        attach_ajax_logger(page, debug)
+    # Keep concurrency deliberately modest so we gain latency without
+    # hammering the reservation site with one browser per watched park.
+    try:
+        workers = int(os.environ.get("PARALLEL_WORKERS", "3"))
+    except ValueError:
+        workers = 3
+    workers = max(1, min(workers, len(names), 4))
 
-        try:
-            for name in rotated_names:
-                time_filter = watch[name]
-                purpose_value, code = BUILDING_INFO[name]
-                weekend_unrestricted = name in weekend_all_day
+    log_event(
+        f"Parallel park checking enabled: {len(names)} park(s), "
+        f"up to {workers} simultaneous worker(s)."
+    )
 
-                try:
-                    found = check_building(
-                        page,
-                        name,
-                        purpose_value,
-                        code,
-                        today,
-                        current_year,
-                        current_month,
-                        time_filter,
-                        weekend_unrestricted,
-                        debug=debug,
-                    )
+    all_found = []
+    notified_found = []
+    failed_parks = []
+    result_lock = threading.Lock()
 
-                    if found:
-                        log_event(
-                            f"Availability found at {name}: {found}"
-                        )
+    def check_one(name):
+        purpose_value, code = BUILDING_INFO[name]
+        time_filter = watch[name]
+        weekend_unrestricted = name in weekend_all_day
 
-                        all_found.extend(found)
+        # IMPORTANT: create Playwright inside this worker. A sync Playwright
+        # object/page must not be shared between concurrent threads.
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            page = browser.new_page()
+            attach_ajax_logger(page, debug)
+            try:
+                return check_building(
+                    page,
+                    name,
+                    purpose_value,
+                    code,
+                    today,
+                    current_year,
+                    current_month,
+                    time_filter,
+                    weekend_unrestricted,
+                    debug=debug,
+                )
+            finally:
+                browser.close()
 
-                        # IMPORTANT:
-                        # Notify immediately after THIS park is checked.
-                        # Do not wait for the remaining parks — this
-                        # happens regardless of stop_on_first_find.
-                        #
-                        # on_slots_found returns whether it actually sent a
-                        # Telegram message. "Found" alone isn't enough to
-                        # justify stopping early — e.g. SKIP_ON_RAIN can
-                        # find real availability and still send nothing.
-                        # Stopping (and rotating past this park) in that
-                        # case would waste the whole run: no notification
-                        # went out, AND the remaining watched parks never
-                        # got checked. So we only stop when something was
-                        # actually sent.
-                        notified = (
-                            on_slots_found(found)
-                            if on_slots_found is not None
-                            else True
-                        )
-                        if notified:
-                            notified_found.extend(found)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_name = {executor.submit(check_one, name): name for name in names}
 
-                        if stop_on_first_find and notified:
-                            # Stop checking the rest of the watched parks
-                            # this run — you already have a slot to go
-                            # book, and every extra park checked is extra
-                            # time before you can act on it. The remaining
-                            # parks just get checked again on the next
-                            # scheduled run.
-                            #
-                            # Resume point for NEXT run: the park right
-                            # after this one, in the ORIGINAL (unrotated)
-                            # order — not index 0 — so a park that keeps
-                            # having openings can't starve out the ones
-                            # listed after it forever.
-                            next_start = names[(names.index(name) + 1) % len(names)]
-                            save_next_park_name(next_start)
-
-                            log_event(
-                                f"Stopping this run early after finding "
-                                f"availability at {name} — not checking "
-                                f"the remaining watched parks. Next run "
-                                f"will start from {next_start}."
-                            )
-                            break
-                        elif stop_on_first_find:
-                            # Found availability, but on_slots_found sent
-                            # no actual message (e.g. every slot was
-                            # rain-skipped) — don't treat this as a stop
-                            # condition or advance the rotation. Keep
-                            # checking the remaining watched parks this
-                            # run, same as if nothing had been found here.
-                            log_event(
-                                f"{name} had availability but nothing was "
-                                f"actually notified — continuing to check "
-                                f"the remaining watched parks this run."
-                            )
-                        # else: STOP_ON_FIRST_FIND=false — notification
-                        # already sent above, just fall through and keep
-                        # checking the remaining parks below.
-
-                except Exception as e:
-                    # Isolate the failure to THIS park — log it and move on
-                    # to the rest rather than losing the whole run.
-                    log_event(
-                        f"Skipping {name} this run after repeated failures: {e}"
-                    )
-
-                    if debug:
-                        save_debug_snapshot(page, f"gave_up_{name}")
-
+        # as_completed is the key latency improvement: a fast worker that finds
+        # a slot notifies immediately; it never waits for a slower park.
+        for future in concurrent.futures.as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                found = future.result()
+            except Exception as e:
+                log_event(f"Skipping {name} this run after repeated failures: {e}")
+                with result_lock:
                     failed_parks.append(name)
-                    continue
+                continue
 
-                # Small pause between parks to avoid sending a rapid burst of
-                # requests that might trigger throttling on the site's side.
-                page.wait_for_timeout(PARK_PAUSE_MS)
+            if not found:
+                continue
 
-            else:
-                # Loop finished WITHOUT an early break — every watched park
-                # got checked this run (found or not). Full cycle done, so
-                # next run can just start from the top again. (Only
-                # meaningful in stop_on_first_find mode — when it's False
-                # every run always checks everyone anyway, so there's no
-                # rotation state to maintain.)
-                if stop_on_first_find:
-                    save_next_park_name(names[0])
+            log_event(f"Availability found at {name}: {found}")
+            with result_lock:
+                all_found.extend(found)
 
-        finally:
-            browser.close()
+            # Notify right now, while the other park workers continue.
+            notified = (
+                on_slots_found(found)
+                if on_slots_found is not None
+                else True
+            )
+            if notified:
+                with result_lock:
+                    notified_found.extend(found)
 
     if failed_parks and len(failed_parks) == len(watch):
-        # Every single park failed — this looks like a site-wide problem.
         raise MaintenanceDetected(
-            f"All {len(watch)} parks failed this run: "
-            f"{', '.join(failed_parks)}"
+            f"All {len(watch)} parks failed this run: {', '.join(failed_parks)}"
         )
 
     if failed_parks:
         log_event(
-            f"Note: these parks could not be checked this run "
-            f"and were skipped: {failed_parks}"
+            f"Note: these parks could not be checked this run and were skipped: "
+            f"{failed_parks}"
         )
 
-    return all_found, notified_found
+    return sorted(all_found), sorted(notified_found)
 
 
 # ---------------------------------------------------------------------------
