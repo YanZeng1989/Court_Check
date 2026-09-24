@@ -1,0 +1,378 @@
+{
+  "generated_at": "2026-09-24T10:31:16.391584+00:00",
+  "source": "https://kouen.sports.metro.tokyo.lg.jp/web/index.jsp",
+  "facilities": {
+    "日比谷公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1000",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "芝公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1010",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "猿江恩賜公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1040",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "亀戸中央公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1050",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "木場公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1060",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "祖師谷公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1070",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "東白鬚公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1090",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "浮間公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1100",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "城北中央公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1110",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "赤塚公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1120",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "東綾瀬公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1130",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "舎人公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1140",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "篠崎公園Ａ": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1150",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "大島小松川公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1160",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "汐入公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1170",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "高井戸公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1175",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "善福寺川緑地": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1180",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "光が丘公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1190",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "石神井公園Ｂ": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1205",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "井の頭恩賜公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1220",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "武蔵野中央公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1230",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "小金井公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1240",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "野川公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1260",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "府中の森公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1270",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00",
+        "50": "17:00",
+        "60": "19:00"
+      }
+    },
+    "東大和南公園": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1280",
+      "slot_times": {
+        "10": "09:00",
+        "20": "11:00",
+        "30": "13:00",
+        "40": "15:00"
+      }
+    },
+    "大井ふ頭海浜公園Ｂ": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1315",
+      "slot_times": {
+        "10": "07:00",
+        "20": "09:00",
+        "30": "11:00",
+        "40": "13:00",
+        "50": "15:00"
+      }
+    },
+    "有明テニスＣ人工芝コート": {
+      "purpose_value": "1000_1030",
+      "purpose_name": "テニス（人工芝）",
+      "building_code": "1360",
+      "slot_times": {
+        "10": "07:00",
+        "20": "09:00",
+        "30": "11:00",
+        "40": "13:00",
+        "50": "15:00"
+      }
+    },
+    "大井ふ頭海浜公園Ａ（ハード）": {
+      "purpose_value": "1000_1020",
+      "purpose_name": "テニス（ハード）",
+      "building_code": "1310",
+      "slot_times": {},
+      "error": "TimeoutError: Page.select_option: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#bname-home\")\n    - locator resolved to <select id=\"bname-home\" class=\"custom-select\" onchange=\"filterInst3('bname-home','iname')\">…</select>\n  - attempting select option action\n    2 × waiting for element to be visible and enabled\n      - did not find some options\n    - retrying select option action\n    - waiting 20ms\n    2 × waiting for element to be visible and enabled\n      - did not find some options\n    - retrying select option action\n      - waiting 100ms\n    60 × waiting for element to be visible and enabled\n       - did not find some options\n     - retrying select option action\n       - waiting 500ms\n"
+    },
+    "大井ふ頭海浜公園Ｂ（ハード）": {
+      "purpose_value": "1000_1020",
+      "purpose_name": "テニス（ハード）",
+      "building_code": "1315",
+      "slot_times": {
+        "10": "07:00",
+        "20": "09:00",
+        "30": "11:00",
+        "40": "13:00",
+        "50": "15:00"
+      }
+    },
+    "有明テニスＡ屋外ハードコート": {
+      "purpose_value": "1000_1020",
+      "purpose_name": "テニス（ハード）",
+      "building_code": "1350",
+      "slot_times": {
+        "10": "07:00",
+        "20": "09:00",
+        "30": "11:00",
+        "40": "13:00",
+        "50": "15:00",
+        "60": "17:00",
+        "70": "19:00"
+      }
+    },
+    "有明テニスＢインドアコート": {
+      "purpose_value": "1000_1020",
+      "purpose_name": "テニス（ハード）",
+      "building_code": "1370",
+      "slot_times": {
+        "10": "07:00",
+        "20": "09:00",
+        "30": "11:00",
+        "40": "13:00",
+        "50": "15:00",
+        "60": "17:00",
+        "70": "19:00"
+      }
+    }
+  }
+}
