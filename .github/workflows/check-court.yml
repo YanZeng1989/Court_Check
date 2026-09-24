@@ -1,13 +1,12 @@
-name: Check tennis court availability
+name: Check Court Availability
 
 on:
-  # Triggered externally through workflow_dispatch.
-  # Recommended external cadence for this 2-worker version: every 2 minutes.
-  workflow_dispatch: {}
+  # 由外部 cron 服务触发 workflow_dispatch
+  workflow_dispatch:
 
-# Keep only one workflow run active at a time. Parallelism happens INSIDE
-# the Python process (2 park workers), avoiding a pile-up of overlapping
-# GitHub Actions runs hitting the reservation site at the same time.
+# 不让两轮检查重叠。
+# 如果上一轮还没结束，下一轮会等待。
+# 场地并行是在 Python 内部完成的。
 concurrency:
   group: check-court-availability
   cancel-in-progress: false
@@ -19,56 +18,68 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
 
-      - name: Install Python packages
-        run: pip install playwright jpholiday
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright jpholiday
 
-      - name: Get installed Playwright version
-        id: pw-version
-        run: echo "version=$(playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      # 获取 Playwright 版本，用来缓存 Chromium
+      - name: Get Playwright version
+        id: playwright-version
+        shell: bash
+        run: |
+          echo "version=$(python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Playwright browser binary
+      - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
       - name: Install Chromium
-        run: playwright install --with-deps chromium
-
-      - name: Write config.txt from secrets
         run: |
-          cat > config.txt << EOF
+          playwright install --with-deps chromium
+
+      - name: Create config.txt
+        shell: bash
+        run: |
+          cat > config.txt <<'EOF'
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH=${{ secrets.WATCH }}
           WEEKEND_ALL_DAY=${{ secrets.WEEKEND_ALL_DAY }}
+          SKIP_ON_RAIN=${{ secrets.SKIP_ON_RAIN }}
+          RAIN_PROBABILITY_THRESHOLD=${{ secrets.RAIN_PROBABILITY_THRESHOLD }}
+          LOG_RETENTION_DAYS=7
+          STOP_ON_FIRST_FIND=false
           DEBUG=false
+          HEADED=false
           EOF
 
-      - name: Run checker
-        env:
-          # Two simultaneous browsers was chosen after the 3-worker run showed
-          # #week-head timeouts on multiple Ariake courts.
-          PARALLEL_WORKERS: "2"
-        run: python check_court_availability.py
+      - name: Run court availability checker
+        run: |
+          python check_court_availability.py
 
-      - name: Upload debug artifacts
+      - name: Upload debug output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-output
           path: |
+            log.txt
             debug_error.png
             debug_error.html
-            debug_calendar_sample.png
-            debug_calendar_sample.html
-            log.txt
+            debug_*.png
+            debug_*.html
           if-no-files-found: ignore
+          retention-days: 3
