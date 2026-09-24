@@ -1,12 +1,8 @@
 name: Check Court Availability
 
 on:
-  # 由外部 cron 服务触发 workflow_dispatch
   workflow_dispatch:
 
-# 不让两轮检查重叠。
-# 如果上一轮还没结束，下一轮会等待。
-# 场地并行是在 Python 内部完成的。
 concurrency:
   group: check-court-availability
   cancel-in-progress: false
@@ -18,6 +14,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      PARALLEL_WORKERS: "2"
 
     steps:
       - name: Checkout repository
@@ -28,27 +26,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install playwright jpholiday
 
-      # 获取 Playwright 版本，用来缓存 Chromium
-      - name: Get Playwright version
-        id: playwright-version
-        shell: bash
-        run: |
-          echo "version=$(python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
       - name: Install Chromium
         run: |
           playwright install --with-deps chromium
+
+      - name: Verify mapping file
+        run: |
+          test -f facility_time_mappings.json
+          python -m json.tool facility_time_mappings.json >/dev/null
 
       - name: Create config.txt
         shell: bash
@@ -70,16 +60,17 @@ jobs:
         run: |
           python check_court_availability.py
 
-      - name: Upload debug output
+      - name: Upload run diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-output
+          name: court-check-output
           path: |
             log.txt
+            facility_time_mappings.json
             debug_error.png
             debug_error.html
             debug_*.png
             debug_*.html
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 7
