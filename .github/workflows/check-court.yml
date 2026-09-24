@@ -30,10 +30,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          pip install playwright jpholiday
-          playwright install --with-deps chromium
+      - name: Install Python packages
+        run: pip install playwright jpholiday
+
+      - name: Get installed Playwright version
+        id: pw-version
+        run: echo "version=$(playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browser binary
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Chromium (only downloads if the cache above missed)
+        # --with-deps installs the OS-level libraries chromium needs; that
+        # part is fast and safe to re-run every time (apt just no-ops if
+        # already satisfied). The slow part — downloading and unpacking
+        # the ~100MB Chromium binary itself — is what the cache above
+        # skips on a hit.
+        run: playwright install --with-deps chromium
 
       - name: Write config.txt from secrets
         run: |
