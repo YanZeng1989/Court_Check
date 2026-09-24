@@ -1,0 +1,45 @@
+name: Discover Facility Times
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+
+      - name: Install Chromium
+        run: |
+          playwright install --with-deps chromium
+
+      - name: Discover actual facility time-slot mappings
+        run: |
+          python discover_facility_times.py
+
+      - name: Upload diagnostic results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: facility-time-diagnostic
+          path: |
+            facility_time_diagnostic.json
+            facility_time_diagnostic.txt
+          if-no-files-found: warn
+          retention-days: 7
