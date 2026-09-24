@@ -1167,7 +1167,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
                     const el = document.querySelector('#week-head');
                     return el && el.innerText !== previous;
                 }""",
-                previous_header,
+                arg=previous_header,
                 timeout=10000,
             )
         except PlaywrightTimeoutError:
