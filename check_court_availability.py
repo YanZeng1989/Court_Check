@@ -128,6 +128,7 @@ import re
 import sys
 import json
 import time
+import threading
 import datetime
 import concurrent.futures
 import functools
@@ -148,6 +149,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
 DEBUG_SCREENSHOT_PATH = os.path.join(SCRIPT_DIR, "debug_error.png")
 DEBUG_HTML_PATH = os.path.join(SCRIPT_DIR, "debug_error.html")
+FACILITY_TIME_MAPPING_PATH = os.path.join(SCRIPT_DIR, "facility_time_mappings.json")
 
 # One-time diagnostic dump of the first successfully-loaded calendar page,
 # used while we're tracking down why some time slots never get detected.
@@ -216,7 +218,7 @@ BUILDING_INFO = {
 # shared dict here previously mislabeled every hard-court slot by 2 hours
 # and silently dropped the real 19:00 slot entirely (code "70" wasn't in
 # the dict, so it resolved to no time at all) — see
-# _slot_times_for_purpose() for how callers pick the right one.
+# _slot_times_for_building() for how callers pick the right one.
 SLOT_TIMES_TURF = {
     "10": "09:00",
     "20": "11:00",
@@ -236,22 +238,177 @@ SLOT_TIMES_HARD = {
     "70": "19:00",
 }
 
+# Ariake C artificial-turf court uses its own shorter daily schedule.
+# Confirmed from the reservation calendar: 07:00, 09:00, 11:00, 13:00, 15:00.
+SLOT_TIMES_ARIake_C = {
+    "10": "07:00",
+    "20": "09:00",
+    "30": "11:00",
+    "40": "13:00",
+    "50": "15:00",
+}
+
+# These parks are ignored on ordinary weekdays even if they are present in WATCH.
+# They are still checked on Saturdays, Sundays and Japanese public holidays.
+WEEKEND_ONLY_PARKS = {
+    "有明テニスＣ人工芝コート",
+}
+
 # Backwards-compatible alias: several places (comments, the debug dump)
 # still refer to "SLOT_TIMES" generically for validity/logging purposes
 # where the turf/hard distinction doesn't matter (e.g. "is this string a
 # real slot-time value at all"). Actual lookups during scraping MUST go
-# through _slot_times_for_purpose(), not this directly.
+# through _slot_times_for_building(), not this directly.
 SLOT_TIMES = SLOT_TIMES_TURF
 
 
-def _slot_times_for_purpose(purpose_value: str) -> dict:
-    """Returns the correct cell-id-suffix -> time-of-day dict for the
-    given purpose (PURPOSE_ARTIFICIAL_TURF vs PURPOSE_HARD_COURT) — see
-    the comment above SLOT_TIMES_TURF/SLOT_TIMES_HARD for why these
-    differ."""
+_facility_mapping_lock = threading.Lock()
+_runtime_facility_slot_times = {}
+
+
+def _load_preserved_facility_mappings() -> dict:
+    """Load the full-site mapping captured by discover_facility_times.py.
+
+    This file is deliberately separate from WATCH: changing the parks being
+    monitored does not throw away the mappings already learned for other
+    supported facilities.
+    """
+    try:
+        with open(FACILITY_TIME_MAPPING_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        facilities = payload.get("facilities", {})
+        return {
+            name: dict(info.get("slot_times", {}))
+            for name, info in facilities.items()
+            if info.get("slot_times")
+        }
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+_PRESERVED_FACILITY_SLOT_TIMES = _load_preserved_facility_mappings()
+
+
+def _slot_times_for_building(building_name: str, purpose_value: str) -> dict:
+    """Return the best mapping available for one specific facility.
+
+    Priority:
+      1. Mapping discovered from the live calendar in THIS run.
+      2. Preserved per-facility mapping from facility_time_mappings.json.
+      3. Legacy court-type fallback, only for safety.
+
+    The first two levels mean a facility is no longer forced to share the
+    same hours merely because it has the same broad court type.
+    """
+    with _facility_mapping_lock:
+        live = _runtime_facility_slot_times.get(building_name)
+        if live:
+            return dict(live)
+
+    preserved = _PRESERVED_FACILITY_SLOT_TIMES.get(building_name)
+    if preserved:
+        return dict(preserved)
+
+    # Safety fallback for a newly-added facility that has not yet reached a
+    # readable calendar. The live mapping normally replaces this immediately.
+    if building_name == "有明テニスＣ人工芝コート":
+        return SLOT_TIMES_ARIake_C
     if purpose_value == PURPOSE_HARD_COURT:
         return SLOT_TIMES_HARD
     return SLOT_TIMES_TURF
+
+
+def _normalize_displayed_time(text: str):
+    """Extract HH:MM from labels such as '７時', '17時', or '17:00'."""
+    if not text:
+        return None
+    normalized = str(text).translate(str.maketrans("０１２３４５６７８９：", "0123456789:"))
+    m = re.search(r"(?<!\d)(\d{1,2})\s*時", normalized)
+    if m:
+        hour = int(m.group(1))
+        if 0 <= hour <= 23:
+            return f"{hour:02d}:00"
+    m = re.search(r"(?<!\d)(\d{1,2})\s*:\s*(\d{2})", normalized)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    return None
+
+
+def _discover_slot_times_from_calendar(page) -> dict:
+    """Read slot-code -> displayed-time directly from the current calendar.
+
+    No TURF/HARD assumption is used here. Each td id (YYYYMMDD_CODE) is tied
+    back to its rendered row, whose header/first cell contains the time label.
+    """
+    rows = page.evaluate(
+        r"""() => {
+            const out = [];
+            for (const cell of document.querySelectorAll('td[id]')) {
+                const id = cell.id || '';
+                const m = id.match(/^(\d{8})_(.+)$/);
+                if (!m) continue;
+                const tr = cell.closest('tr');
+                if (!tr) continue;
+                const candidates = [];
+                for (const th of tr.querySelectorAll('th')) {
+                    candidates.push(th.innerText || th.textContent || '');
+                }
+                const first = tr.querySelector('td');
+                if (first) candidates.push(first.innerText || first.textContent || '');
+                candidates.push(tr.innerText || tr.textContent || '');
+                out.push({slot_code: m[2], candidates});
+            }
+            return out;
+        }"""
+    )
+
+    discovered = {}
+    for row in rows:
+        code = str(row.get("slot_code", ""))
+        displayed = None
+        for candidate in row.get("candidates", []):
+            displayed = _normalize_displayed_time(candidate)
+            if displayed:
+                break
+        if not displayed:
+            continue
+        previous = discovered.get(code)
+        if previous and previous != displayed:
+            raise RuntimeError(
+                f"Live calendar gave conflicting times for slot code {code}: "
+                f"{previous} vs {displayed}"
+            )
+        discovered[code] = displayed
+    return discovered
+
+
+def _refresh_facility_mapping_from_page(page, building_name: str, purpose_value: str) -> dict:
+    """Discover and use this facility's live mapping, logging any change."""
+    discovered = _discover_slot_times_from_calendar(page)
+    if not discovered:
+        fallback = _slot_times_for_building(building_name, purpose_value)
+        log_event(
+            f"[warn] {building_name}: could not derive a live slot-time mapping; "
+            f"using preserved/fallback mapping {fallback}."
+        )
+        return fallback
+
+    old = _PRESERVED_FACILITY_SLOT_TIMES.get(building_name)
+    with _facility_mapping_lock:
+        _runtime_facility_slot_times[building_name] = dict(discovered)
+
+    if old != discovered:
+        log_event(
+            f"[mapping-change] {building_name}: live slot mapping is {discovered}; "
+            f"preserved mapping was {old}. Live mapping will be used this run."
+        )
+    else:
+        log_event(f"[mapping] {building_name}: verified live slot mapping {discovered}")
+
+    return dict(discovered)
+
 
 # Monday=0 ... Sunday=6 (matches date.weekday()), used to show the day of
 # the week next to each date in Telegram notifications so it's easier to
@@ -369,13 +526,27 @@ def load_config() -> dict:
         sys.exit(1)
 
     for name, times in watch.items():
-        purpose_value = BUILDING_INFO[name][0]
-        valid_times = set(_slot_times_for_purpose(purpose_value).values())
-        unknown_times = [t for t in times if t not in valid_times]
-        if unknown_times:
-            print(f"Unknown time(s) for {name}: {', '.join(unknown_times)}")
-            print(f"Supported times for {name}: {', '.join(sorted(valid_times))}")
+        bad_format = [
+            t for t in times
+            if not re.fullmatch(r"(?:[01]\\d|2[0-3]):[0-5]\\d", t)
+        ]
+        if bad_format:
+            print(f"Invalid time format(s) for {name}: {', '.join(bad_format)}")
+            print("Use HH:MM, for example 17:00 or 19:00.")
             sys.exit(1)
+
+        # If we already have a preserved per-facility mapping, warn rather
+        # than abort when WATCH contains a time not present there. The live
+        # calendar is authoritative and is re-read during every park check,
+        # so a legitimate schedule change must not make the whole run exit.
+        valid_times = set(_slot_times_for_building(name, BUILDING_INFO[name][0]).values())
+        unknown_times = sorted(t for t in times if t not in valid_times)
+        if unknown_times:
+            print(
+                f"Warning: {name} WATCH time(s) {', '.join(unknown_times)} "
+                f"are not in the preserved mapping {sorted(valid_times)}. "
+                "The live calendar will be checked before availability is evaluated."
+            )
 
     config["_watch"] = watch
 
@@ -1067,6 +1238,13 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
     if debug:
         dump_calendar_sample_once(page, building_name)
 
+    # Learn THIS facility's actual row times from the live calendar.
+    # This deliberately happens before scanning availability so a changed
+    # facility schedule is used immediately in the same run.
+    live_slot_times = _refresh_facility_mapping_from_page(
+        page, building_name, purpose_value
+    )
+
     # Allow this month AND next month (previously: current month only).
     # Tuple comparison below relies on this being the month right after
     # current_month, wrapping December -> January correctly.
@@ -1098,7 +1276,7 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
         # Which cell-suffix -> time dict applies depends on court type
         # (hard courts open 2 hours earlier and have an extra 7th slot —
         # see the comment above SLOT_TIMES_TURF/SLOT_TIMES_HARD).
-        slot_times = _slot_times_for_purpose(purpose_value)
+        slot_times = live_slot_times
 
         # Tracks whether this week has ANY cell that's actually open for
         # booking yet (any status other than "受付期間外" = outside the
@@ -1156,6 +1334,12 @@ def _check_building_once(page, building_name, purpose_value, building_code, toda
             is_weekend_or_holiday = (
                 slot_date.weekday() >= 5 or jpholiday.is_holiday(slot_date)
             )
+
+            # Ariake C is weekend/holiday-only for this monitor.  Skip all
+            # ordinary weekdays before applying its configured time filter.
+            if building_name in WEEKEND_ONLY_PARKS and not is_weekend_or_holiday:
+                continue
+
             if time_filter and slot_time not in time_filter:
                 if not (weekend_unrestricted and is_weekend_or_holiday):
                     continue
